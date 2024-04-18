@@ -1310,6 +1310,8 @@ static int bdisp_probe(struct platform_device *pdev)
 	init_waitqueue_head(&bdisp->irq_queue);
 	INIT_DELAYED_WORK(&bdisp->timeout_work, bdisp_irq_timeout);
 	bdisp->work_queue = create_workqueue(BDISP_NAME);
+	if (!bdisp->work_queue)
+		return -ENOMEM;
 
 	spin_lock_init(&bdisp->slock);
 	mutex_init(&bdisp->lock);
@@ -1318,7 +1320,6 @@ static int bdisp_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	bdisp->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(bdisp->regs)) {
-		dev_err(dev, "failed to get regs\n");
 		ret = PTR_ERR(bdisp->regs);
 		goto err_wq;
 	}

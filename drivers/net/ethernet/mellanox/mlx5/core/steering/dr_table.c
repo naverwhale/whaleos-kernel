@@ -9,7 +9,7 @@ int mlx5dr_table_set_miss_action(struct mlx5dr_table *tbl,
 	struct mlx5dr_matcher *last_matcher = NULL;
 	struct mlx5dr_htbl_connect_info info;
 	struct mlx5dr_ste_htbl *last_htbl;
-	int ret;
+	int ret = -EOPNOTSUPP;
 
 	if (action && action->action_type != DR_ACTION_TYP_FT)
 		return -EOPNOTSUPP;
@@ -19,7 +19,7 @@ int mlx5dr_table_set_miss_action(struct mlx5dr_table *tbl,
 	if (!list_empty(&tbl->matcher_list))
 		last_matcher = list_last_entry(&tbl->matcher_list,
 					       struct mlx5dr_matcher,
-					       matcher_list);
+					       list_node);
 
 	if (tbl->dmn->type == MLX5DR_DOMAIN_TYPE_NIC_RX ||
 	    tbl->dmn->type == MLX5DR_DOMAIN_TYPE_FDB) {
@@ -29,7 +29,7 @@ int mlx5dr_table_set_miss_action(struct mlx5dr_table *tbl,
 			last_htbl = tbl->rx.s_anchor;
 
 		tbl->rx.default_icm_addr = action ?
-			action->dest_tbl.tbl->rx.s_anchor->chunk->icm_addr :
+			action->dest_tbl->tbl->rx.s_anchor->chunk->icm_addr :
 			tbl->rx.nic_dmn->default_icm_addr;
 
 		info.type = CONNECT_MISS;
@@ -53,7 +53,7 @@ int mlx5dr_table_set_miss_action(struct mlx5dr_table *tbl,
 			last_htbl = tbl->tx.s_anchor;
 
 		tbl->tx.default_icm_addr = action ?
-			action->dest_tbl.tbl->tx.s_anchor->chunk->icm_addr :
+			action->dest_tbl->tbl->tx.s_anchor->chunk->icm_addr :
 			tbl->tx.nic_dmn->default_icm_addr;
 
 		info.type = CONNECT_MISS;
@@ -67,6 +67,9 @@ int mlx5dr_table_set_miss_action(struct mlx5dr_table *tbl,
 			goto out;
 		}
 	}
+
+	if (ret)
+		goto out;
 
 	/* Release old action */
 	if (tbl->miss_action)

@@ -29,8 +29,6 @@
 #define ACPI_ALS_DEVICE_NAME		"acpi-als"
 #define ACPI_ALS_NOTIFY_ILLUMINANCE	0x80
 
-ACPI_MODULE_NAME("acpi-als");
-
 /*
  * So far, there's only one channel in here, but the specification for
  * ACPI0008 says there can be more to what the block can report. Like
@@ -93,7 +91,7 @@ static int acpi_als_read_value(struct acpi_als *als, char *prop, s32 *val)
 				       &temp_val);
 
 	if (ACPI_FAILURE(status)) {
-		ACPI_EXCEPTION((AE_INFO, status, "Error reading ALS %s", prop));
+		acpi_evaluation_failure_warn(als->device->handle, prop, status);
 		return -EIO;
 	}
 
@@ -203,14 +201,13 @@ static int acpi_als_add(struct acpi_device *device)
 
 	indio_dev->name = ACPI_ALS_DEVICE_NAME;
 	indio_dev->info = &acpi_als_info;
-	indio_dev->modes = INDIO_BUFFER_SOFTWARE;
 	indio_dev->channels = acpi_als_channels;
 	indio_dev->num_channels = ARRAY_SIZE(acpi_als_channels);
 
-	als->trig = devm_iio_trigger_alloc(dev, "%s-dev%d", indio_dev->name, indio_dev->id);
+	als->trig = devm_iio_trigger_alloc(dev, "%s-dev%d", indio_dev->name,
+					   iio_device_id(indio_dev));
 	if (!als->trig)
 		return -ENOMEM;
-	als->trig->dev.parent = dev;
 
 	ret = devm_iio_trigger_register(dev, als->trig);
 	if (ret)

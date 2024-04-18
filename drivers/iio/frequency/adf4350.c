@@ -584,13 +584,12 @@ error_disable_reg:
 	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
 error_disable_clk:
-	if (clk)
-		clk_disable_unprepare(clk);
+	clk_disable_unprepare(clk);
 
 	return ret;
 }
 
-static int adf4350_remove(struct spi_device *spi)
+static void adf4350_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct adf4350_state *st = iio_priv(indio_dev);
@@ -601,13 +600,10 @@ static int adf4350_remove(struct spi_device *spi)
 
 	iio_device_unregister(indio_dev);
 
-	if (st->clk)
-		clk_disable_unprepare(st->clk);
+	clk_disable_unprepare(st->clk);
 
 	if (!IS_ERR(reg))
 		regulator_disable(reg);
-
-	return 0;
 }
 
 static const struct of_device_id adf4350_of_match[] = {

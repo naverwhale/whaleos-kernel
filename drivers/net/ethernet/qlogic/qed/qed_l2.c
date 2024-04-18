@@ -396,6 +396,7 @@ int qed_sp_eth_vport_start(struct qed_hwfn *p_hwfn,
 		tpa_param->tpa_ipv6_en_flg = 1;
 		tpa_param->tpa_pkt_split_flg = 1;
 		tpa_param->tpa_gro_consistent_flg = 1;
+		break;
 	default:
 		break;
 	}
@@ -1862,7 +1863,8 @@ static void __qed_get_vport_stats(struct qed_hwfn *p_hwfn,
 }
 
 static void _qed_get_vport_stats(struct qed_dev *cdev,
-				 struct qed_eth_stats *stats)
+				 struct qed_eth_stats *stats,
+				 bool is_atomic)
 {
 	u8 fw_vport = 0;
 	int i;
@@ -1871,10 +1873,11 @@ static void _qed_get_vport_stats(struct qed_dev *cdev,
 
 	for_each_hwfn(cdev, i) {
 		struct qed_hwfn *p_hwfn = &cdev->hwfns[i];
-		struct qed_ptt *p_ptt = IS_PF(cdev) ? qed_ptt_acquire(p_hwfn)
-						    :  NULL;
+		struct qed_ptt *p_ptt;
 		bool b_get_port_stats;
 
+		p_ptt = IS_PF(cdev) ? qed_ptt_acquire_context(p_hwfn, is_atomic)
+				    : NULL;
 		if (IS_PF(cdev)) {
 			/* The main vport index is relative first */
 			if (qed_fw_vport(p_hwfn, 0, &fw_vport)) {
@@ -1900,14 +1903,21 @@ out:
 
 void qed_get_vport_stats(struct qed_dev *cdev, struct qed_eth_stats *stats)
 {
+	qed_get_vport_stats_context(cdev, stats, false);
+}
+
+void qed_get_vport_stats_context(struct qed_dev *cdev,
+				 struct qed_eth_stats *stats,
+				 bool is_atomic)
+{
 	u32 i;
 
-	if (!cdev) {
+	if (!cdev || cdev->recov_in_prog) {
 		memset(stats, 0, sizeof(*stats));
 		return;
 	}
 
-	_qed_get_vport_stats(cdev, stats);
+	_qed_get_vport_stats(cdev, stats, is_atomic);
 
 	if (!cdev->reset_stats)
 		return;
@@ -1959,7 +1969,7 @@ void qed_reset_vport_stats(struct qed_dev *cdev)
 	if (!cdev->reset_stats) {
 		DP_INFO(cdev, "Reset stats not allocated\n");
 	} else {
-		_qed_get_vport_stats(cdev, cdev->reset_stats);
+		_qed_get_vport_stats(cdev, cdev->reset_stats, false);
 		cdev->reset_stats->common.link_change_count = 0;
 	}
 }
@@ -2762,25 +2772,6 @@ static int qed_configure_filter_mcast(struct qed_dev *cdev,
 	return qed_filter_mcast_cmd(cdev, &mcast, QED_SPQ_MODE_CB, NULL);
 }
 
-static int qed_configure_filter(struct qed_dev *cdev,
-				struct qed_filter_params *params)
-{
-	enum qed_filter_rx_mode_type accept_flags;
-
-	switch (params->type) {
-	case QED_FILTER_TYPE_UCAST:
-		return qed_configure_filter_ucast(cdev, &params->filter.ucast);
-	case QED_FILTER_TYPE_MCAST:
-		return qed_configure_filter_mcast(cdev, &params->filter.mcast);
-	case QED_FILTER_TYPE_RX_MODE:
-		accept_flags = params->filter.accept_flags;
-		return qed_configure_filter_rx_mode(cdev, accept_flags);
-	default:
-		DP_NOTICE(cdev, "Unknown filter type %d\n", (int)params->type);
-		return -EINVAL;
-	}
-}
-
 static int qed_configure_arfs_searcher(struct qed_dev *cdev,
 				       enum qed_filter_config_mode mode)
 {
@@ -2903,7 +2894,9 @@ static const struct qed_eth_ops qed_eth_ops_pass = {
 	.q_rx_stop = &qed_stop_rxq,
 	.q_tx_start = &qed_start_txq,
 	.q_tx_stop = &qed_stop_txq,
-	.filter_config = &qed_configure_filter,
+	.filter_config_rx_mode = &qed_configure_filter_rx_mode,
+	.filter_config_ucast = &qed_configure_filter_ucast,
+	.filter_config_mcast = &qed_configure_filter_mcast,
 	.fastpath_stop = &qed_fastpath_stop,
 	.eth_cqe_completion = &qed_fp_cqe_completion,
 	.get_vport_stats = &qed_get_vport_stats,

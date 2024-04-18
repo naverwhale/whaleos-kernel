@@ -40,6 +40,6 @@ config HID_SENSOR_LGE_8353
 	select HID_SENSOR_IIO_TRIGGER
 	tristate "HID Hinge"
 	help
-      LGE 8353 sensor customization for hinge angle values
+          LGE 8353 sensor customization for hinge angle values
 
 endmenu

@@ -61,6 +61,7 @@ static int iqs624_pos_notifier(struct notifier_block *notifier,
 	iqs624_pos = container_of(notifier, struct iqs624_pos_private,
 				  notifier);
 	indio_dev = iqs624_pos->indio_dev;
+	timestamp = iio_get_time_ns(indio_dev);
 
 	iqs62x = iqs624_pos->iqs62x;
 	if (iqs62x->dev_desc->prod_num == IQS625_PROD_NUM)

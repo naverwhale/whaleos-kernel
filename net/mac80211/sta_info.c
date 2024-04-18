@@ -425,15 +425,11 @@ struct sta_info *sta_info_alloc(struct ieee80211_sub_if_data *sdata,
 	if (sta_prepare_rate_control(local, sta, gfp))
 		goto free_txq;
 
-	sta->airtime_weight = IEEE80211_DEFAULT_AIRTIME_WEIGHT;
 
 	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
 		skb_queue_head_init(&sta->ps_tx_buf[i]);
 		skb_queue_head_init(&sta->tx_filtered[i]);
-		sta->airtime[i].deficit = sta->airtime_weight;
-		atomic_set(&sta->airtime[i].aql_tx_pending, 0);
-		sta->airtime[i].aql_limit_low = local->aql_txq_limit_low[i];
-		sta->airtime[i].aql_limit_high = local->aql_txq_limit_high[i];
+		init_airtime_info(&sta->airtime[i], &local->airtime[i]);
 	}
 
 	for (i = 0; i < IEEE80211_NUM_TIDS; i++)
@@ -547,7 +543,7 @@ static int sta_info_insert_check(struct sta_info *sta)
 		return -ENETDOWN;
 
 	if (WARN_ON(ether_addr_equal(sta->sta.addr, sdata->vif.addr) ||
-		    is_multicast_ether_addr(sta->sta.addr)))
+		    !is_valid_ether_addr(sta->sta.addr)))
 		return -EINVAL;
 
 	/* The RCU read lock is required by rhashtable due to
@@ -645,13 +641,13 @@ static int sta_info_insert_finish(struct sta_info *sta) __acquires(RCU)
 	/* check if STA exists already */
 	if (sta_info_get_bss(sdata, sta->sta.addr)) {
 		err = -EEXIST;
-		goto out_err;
+		goto out_cleanup;
 	}
 
 	sinfo = kzalloc(sizeof(struct station_info), GFP_KERNEL);
 	if (!sinfo) {
 		err = -ENOMEM;
-		goto out_err;
+		goto out_cleanup;
 	}
 
 	local->num_sta++;
@@ -707,8 +703,8 @@ static int sta_info_insert_finish(struct sta_info *sta) __acquires(RCU)
  out_drop_sta:
 	local->num_sta--;
 	synchronize_net();
+ out_cleanup:
 	cleanup_single_sta(sta);
- out_err:
 	mutex_unlock(&local->sta_mtx);
 	kfree(sinfo);
 	rcu_read_lock();
@@ -1040,7 +1036,8 @@ static int __must_check __sta_info_destroy_part1(struct sta_info *sta)
 	list_del_rcu(&sta->list);
 	sta->removed = true;
 
-	drv_sta_pre_rcu_remove(local, sta->sdata, sta);
+	if (sta->uploaded)
+		drv_sta_pre_rcu_remove(local, sta->sdata, sta);
 
 	if (sdata->vif.type == NL80211_IFTYPE_AP_VLAN &&
 	    rcu_access_pointer(sdata->u.vlan.sta) == sta)
@@ -1892,24 +1889,59 @@ void ieee80211_sta_set_buffered(struct ieee80211_sta *pubsta,
 }
 EXPORT_SYMBOL(ieee80211_sta_set_buffered);
 
+void ieee80211_register_airtime(struct ieee80211_txq *txq,
+				u32 tx_airtime, u32 rx_airtime)
+{
+	struct ieee80211_sub_if_data *sdata = vif_to_sdata(txq->vif);
+	struct ieee80211_local *local = sdata->local;
+	u64 weight_sum, weight_sum_reciprocal;
+	struct airtime_sched_info *air_sched;
+	struct airtime_info *air_info;
+	u32 airtime = 0;
+
+	air_sched = &local->airtime[txq->ac];
+	air_info = to_airtime_info(txq);
+
+	if (local->airtime_flags & AIRTIME_USE_TX)
+		airtime += tx_airtime;
+	if (local->airtime_flags & AIRTIME_USE_RX)
+		airtime += rx_airtime;
+
+	/* Weights scale so the unit weight is 256 */
+	airtime <<= 8;
+
+	spin_lock_bh(&air_sched->lock);
+
+	air_info->tx_airtime += tx_airtime;
+	air_info->rx_airtime += rx_airtime;
+
+	if (air_sched->weight_sum) {
+		weight_sum = air_sched->weight_sum;
+		weight_sum_reciprocal = air_sched->weight_sum_reciprocal;
+	} else {
+		weight_sum = air_info->weight;
+		weight_sum_reciprocal = air_info->weight_reciprocal;
+	}
+
+	/* Round the calculation of global vt */
+	air_sched->v_t += (u64)((airtime + (weight_sum >> 1)) *
+				weight_sum_reciprocal) >> IEEE80211_RECIPROCAL_SHIFT_64;
+	air_info->v_t += (u32)((airtime + (air_info->weight >> 1)) *
+			       air_info->weight_reciprocal) >> IEEE80211_RECIPROCAL_SHIFT_32;
+	ieee80211_resort_txq(&local->hw, txq);
+
+	spin_unlock_bh(&air_sched->lock);
+}
+
 void ieee80211_sta_register_airtime(struct ieee80211_sta *pubsta, u8 tid,
 				    u32 tx_airtime, u32 rx_airtime)
 {
-	struct sta_info *sta = container_of(pubsta, struct sta_info, sta);
-	struct ieee80211_local *local = sta->sdata->local;
-	u8 ac = ieee80211_ac_from_tid(tid);
-	u32 airtime = 0;
+	struct ieee80211_txq *txq = pubsta->txq[tid];
 
-	if (sta->local->airtime_flags & AIRTIME_USE_TX)
-		airtime += tx_airtime;
-	if (sta->local->airtime_flags & AIRTIME_USE_RX)
-		airtime += rx_airtime;
+	if (!txq)
+		return;
 
-	spin_lock_bh(&local->active_txq_lock[ac]);
-	sta->airtime[ac].tx_airtime += tx_airtime;
-	sta->airtime[ac].rx_airtime += rx_airtime;
-	sta->airtime[ac].deficit -= airtime;
-	spin_unlock_bh(&local->active_txq_lock[ac]);
+	ieee80211_register_airtime(txq, tx_airtime, rx_airtime);
 }
 EXPORT_SYMBOL(ieee80211_sta_register_airtime);
 
@@ -2159,7 +2191,7 @@ static void sta_stats_decode_rate(struct ieee80211_local *local, u32 rate,
 
 static int sta_set_rate_info_rx(struct sta_info *sta, struct rate_info *rinfo)
 {
-	u16 rate = READ_ONCE(sta_get_last_rx_stats(sta)->last_rate);
+	u32 rate = READ_ONCE(sta_get_last_rx_stats(sta)->last_rate);
 
 	if (rate == STA_STATS_RATE_INVALID)
 		return -EINVAL;
@@ -2175,9 +2207,9 @@ static inline u64 sta_get_tidstats_msdu(struct ieee80211_sta_rx_stats *rxstats,
 	u64 value;
 
 	do {
-		start = u64_stats_fetch_begin(&rxstats->syncp);
+		start = u64_stats_fetch_begin_irq(&rxstats->syncp);
 		value = rxstats->msdu[tid];
-	} while (u64_stats_fetch_retry(&rxstats->syncp, start));
+	} while (u64_stats_fetch_retry_irq(&rxstats->syncp, start));
 
 	return value;
 }
@@ -2241,9 +2273,9 @@ static inline u64 sta_get_stats_bytes(struct ieee80211_sta_rx_stats *rxstats)
 	u64 value;
 
 	do {
-		start = u64_stats_fetch_begin(&rxstats->syncp);
+		start = u64_stats_fetch_begin_irq(&rxstats->syncp);
 		value = rxstats->bytes;
-	} while (u64_stats_fetch_retry(&rxstats->syncp, start));
+	} while (u64_stats_fetch_retry_irq(&rxstats->syncp, start));
 
 	return value;
 }
@@ -2353,7 +2385,7 @@ void sta_set_sinfo(struct sta_info *sta, struct station_info *sinfo,
 	}
 
 	if (!(sinfo->filled & BIT_ULL(NL80211_STA_INFO_AIRTIME_WEIGHT))) {
-		sinfo->airtime_weight = sta->airtime_weight;
+		sinfo->airtime_weight = sta->airtime[0].weight;
 		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_AIRTIME_WEIGHT);
 	}
 

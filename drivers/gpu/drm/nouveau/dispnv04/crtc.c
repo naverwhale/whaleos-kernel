@@ -762,6 +762,7 @@ static void nv_crtc_destroy(struct drm_crtc *crtc)
 	nouveau_bo_unpin(nv_crtc->cursor.nvbo);
 	nouveau_bo_ref(NULL, &nv_crtc->cursor.nvbo);
 	nvif_notify_dtor(&nv_crtc->vblank);
+	nvif_head_dtor(&nv_crtc->head);
 	kfree(nv_crtc);
 }
 
@@ -1275,31 +1276,9 @@ static const uint32_t modeset_formats[] = {
         DRM_FORMAT_XRGB1555,
 };
 
-static struct drm_plane *
-create_primary_plane(struct drm_device *dev)
-{
-        struct drm_plane *primary;
-        int ret;
-
-        primary = kzalloc(sizeof(*primary), GFP_KERNEL);
-        if (primary == NULL) {
-                DRM_DEBUG_KMS("Failed to allocate primary plane\n");
-                return NULL;
-        }
-
-        /* possible_crtc's will be filled in later by crtc_init */
-        ret = drm_universal_plane_init(dev, primary, 0,
-                                       &drm_primary_helper_funcs,
-                                       modeset_formats,
-                                       ARRAY_SIZE(modeset_formats), NULL,
-                                       DRM_PLANE_TYPE_PRIMARY, NULL);
-        if (ret) {
-                kfree(primary);
-                primary = NULL;
-        }
-
-        return primary;
-}
+static const struct drm_plane_funcs nv04_primary_plane_funcs = {
+	DRM_PLANE_NON_ATOMIC_FUNCS,
+};
 
 static int nv04_crtc_vblank_handler(struct nvif_notify *notify)
 {
@@ -1315,6 +1294,7 @@ nv04_crtc_create(struct drm_device *dev, int crtc_num)
 {
 	struct nouveau_display *disp = nouveau_display(dev);
 	struct nouveau_crtc *nv_crtc;
+	struct drm_plane *primary;
 	int ret;
 
 	nv_crtc = kzalloc(sizeof(*nv_crtc), GFP_KERNEL);
@@ -1329,8 +1309,18 @@ nv04_crtc_create(struct drm_device *dev, int crtc_num)
 	nv_crtc->save = nv_crtc_save;
 	nv_crtc->restore = nv_crtc_restore;
 
-	drm_crtc_init_with_planes(dev, &nv_crtc->base,
-                                  create_primary_plane(dev), NULL,
+	primary = __drm_universal_plane_alloc(dev, sizeof(*primary), 0, 0,
+					      &nv04_primary_plane_funcs,
+					      modeset_formats,
+					      ARRAY_SIZE(modeset_formats), NULL,
+					      DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (IS_ERR(primary)) {
+		ret = PTR_ERR(primary);
+		kfree(nv_crtc);
+		return ret;
+	}
+
+	drm_crtc_init_with_planes(dev, &nv_crtc->base, primary, NULL,
                                   &nv04_crtc_funcs, NULL);
 	drm_crtc_helper_add(&nv_crtc->base, &nv04_crtc_helper_funcs);
 	drm_mode_crtc_set_gamma_size(&nv_crtc->base, 256);
@@ -1351,6 +1341,10 @@ nv04_crtc_create(struct drm_device *dev, int crtc_num)
 	}
 
 	nv04_cursor_init(nv_crtc);
+
+	ret = nvif_head_ctor(&disp->disp, nv_crtc->base.name, nv_crtc->index, &nv_crtc->head);
+	if (ret)
+		return ret;
 
 	ret = nvif_notify_ctor(&disp->disp.object, "kmsVbl", nv04_crtc_vblank_handler,
 			       false, NV04_DISP_NTFY_VBLANK,

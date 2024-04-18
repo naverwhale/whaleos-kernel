@@ -47,12 +47,18 @@ static int __maybe_unused mcp4725_suspend(struct device *dev)
 	struct mcp4725_data *data = iio_priv(i2c_get_clientdata(
 		to_i2c_client(dev)));
 	u8 outbuf[2];
+	int ret;
 
 	outbuf[0] = (data->powerdown_mode + 1) << 4;
 	outbuf[1] = 0;
 	data->powerdown = true;
 
-	return i2c_master_send(data->client, outbuf, 2);
+	ret = i2c_master_send(data->client, outbuf, 2);
+	if (ret < 0)
+		return ret;
+	else if (ret != 2)
+		return -EIO;
+	return 0;
 }
 
 static int __maybe_unused mcp4725_resume(struct device *dev)
@@ -60,13 +66,19 @@ static int __maybe_unused mcp4725_resume(struct device *dev)
 	struct mcp4725_data *data = iio_priv(i2c_get_clientdata(
 		to_i2c_client(dev)));
 	u8 outbuf[2];
+	int ret;
 
 	/* restore previous DAC value */
 	outbuf[0] = (data->dac_value >> 8) & 0xf;
 	outbuf[1] = data->dac_value & 0xff;
 	data->powerdown = false;
 
-	return i2c_master_send(data->client, outbuf, 2);
+	ret = i2c_master_send(data->client, outbuf, 2);
+	if (ret < 0)
+		return ret;
+	else if (ret != 2)
+		return -EIO;
+	return 0;
 }
 static SIMPLE_DEV_PM_OPS(mcp4725_pm_ops, mcp4725_suspend, mcp4725_resume);
 
@@ -167,7 +179,7 @@ static ssize_t mcp4725_read_powerdown(struct iio_dev *indio_dev,
 {
 	struct mcp4725_data *data = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n", data->powerdown);
+	return sysfs_emit(buf, "%d\n", data->powerdown);
 }
 
 static ssize_t mcp4725_write_powerdown(struct iio_dev *indio_dev,
@@ -221,8 +233,8 @@ static const struct iio_chan_spec_ext_info mcp4725_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE,
 			&mcp472x_powerdown_mode_enum[MCP4725]),
-	IIO_ENUM_AVAILABLE("powerdown_mode",
-			&mcp472x_powerdown_mode_enum[MCP4725]),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE,
+			   &mcp472x_powerdown_mode_enum[MCP4725]),
 	{ },
 };
 
@@ -235,8 +247,8 @@ static const struct iio_chan_spec_ext_info mcp4726_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE,
 			&mcp472x_powerdown_mode_enum[MCP4726]),
-	IIO_ENUM_AVAILABLE("powerdown_mode",
-			&mcp472x_powerdown_mode_enum[MCP4726]),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE,
+			   &mcp472x_powerdown_mode_enum[MCP4726]),
 	{ },
 };
 

@@ -485,7 +485,7 @@ static int sun8i_codec_get_lrck_div_order(unsigned int slots,
 
 static unsigned int sun8i_codec_get_sysclk_rate(unsigned int sample_rate)
 {
-	return sample_rate % 4000 ? 22579200 : 24576000;
+	return (sample_rate % 4000) ? 22579200 : 24576000;
 }
 
 static int sun8i_codec_hw_params(struct snd_pcm_substream *substream,
@@ -1222,7 +1222,6 @@ static const struct snd_soc_component_driver sun8i_soc_component = {
 	.probe			= sun8i_codec_component_probe,
 	.idle_bias_on		= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config sun8i_codec_regmap_config = {

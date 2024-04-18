@@ -11,16 +11,13 @@
  * more details.
  */
 
-#include <linux/version.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include "evdi_drm_drv.h"
 
-#if KERNEL_VERSION(5, 1, 0) <= LINUX_VERSION_CODE || defined(EL8)
 #include <drm/drm_probe_helper.h>
-#endif
 
 /*
  * dummy connector to just get EDID,
@@ -36,25 +33,20 @@ static int evdi_get_modes(struct drm_connector *connector)
 	edid = (struct edid *)evdi_painter_get_edid_copy(evdi);
 
 	if (!edid) {
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE || defined(EL8)
 		drm_connector_update_edid_property(connector, NULL);
-#else
-		drm_mode_connector_update_edid_property(connector, NULL);
-#endif
 		return 0;
 	}
 
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE || defined(EL8)
 	ret = drm_connector_update_edid_property(connector, edid);
-#else
-	ret = drm_mode_connector_update_edid_property(connector, edid);
-#endif
 
-	if (!ret)
-		ret = drm_add_edid_modes(connector, edid);
-	else
-		EVDI_ERROR("Failed to set edid modes! error: %d", ret);
+	if (ret) {
+		EVDI_ERROR("Failed to set edid property! error: %d", ret);
+		goto err;
+	}
 
+	ret = drm_add_edid_modes(connector, edid);
+	EVDI_INFO("(card%d) Edid property set", evdi->dev_index);
+err:
 	kfree(edid);
 	return ret;
 }
@@ -63,13 +55,15 @@ static enum drm_mode_status evdi_mode_valid(struct drm_connector *connector,
 					    struct drm_display_mode *mode)
 {
 	struct evdi_device *evdi = connector->dev->dev_private;
-	uint32_t mode_area = mode->hdisplay * mode->vdisplay;
+	uint32_t area_limit = mode->hdisplay * mode->vdisplay;
+	uint32_t mode_limit = area_limit * drm_mode_vrefresh(mode);
 
-	if (evdi->sku_area_limit == 0)
+	if (evdi->pixel_per_second_limit == 0)
 		return MODE_OK;
 
-	if (mode_area > evdi->sku_area_limit) {
-		EVDI_WARN("(dev=%d) Mode %dx%d@%d rejected\n",
+	if (area_limit > evdi->pixel_area_limit ||
+	    mode_limit > evdi->pixel_per_second_limit) {
+		EVDI_WARN("(card%d) Mode %dx%d@%d rejected\n",
 			evdi->dev_index,
 			mode->hdisplay,
 			mode->vdisplay,
@@ -87,11 +81,11 @@ evdi_detect(struct drm_connector *connector, __always_unused bool force)
 
 	EVDI_CHECKPT();
 	if (evdi_painter_is_connected(evdi->painter)) {
-		EVDI_DEBUG("(dev=%d) poll connector state: connected\n",
+		EVDI_INFO("(card%d) Connector state: connected\n",
 			   evdi->dev_index);
 		return connector_status_connected;
 	}
-	EVDI_DEBUG("(dev=%d) poll connector state: disconnected\n",
+	EVDI_VERBOSE("(card%d) Connector state: disconnected\n",
 		   evdi->dev_index);
 	return connector_status_disconnected;
 }
@@ -105,7 +99,6 @@ static void evdi_connector_destroy(struct drm_connector *connector)
 
 static struct drm_encoder *evdi_best_encoder(struct drm_connector *connector)
 {
-#if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE || defined(EL8)
 	struct drm_encoder *encoder;
 
 	drm_connector_for_each_possible_encoder(connector, encoder) {
@@ -113,11 +106,6 @@ static struct drm_encoder *evdi_best_encoder(struct drm_connector *connector)
 	}
 
 	return NULL;
-#else
-	return drm_encoder_find(connector->dev,
-				NULL,
-				connector->encoder_ids[0]);
-#endif
 }
 
 static struct drm_connector_helper_funcs evdi_connector_helper_funcs = {
@@ -154,10 +142,6 @@ int evdi_connector_init(struct drm_device *dev, struct drm_encoder *encoder)
 
 	evdi->conn = connector;
 
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE  || defined(EL8)
 	drm_connector_attach_encoder(connector, encoder);
-#else
-	drm_mode_connector_attach_encoder(connector, encoder);
-#endif
 	return 0;
 }

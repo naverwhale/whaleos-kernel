@@ -73,47 +73,34 @@ static struct v4l2_subdev_internal_ops csi2_sd_internal_ops = {
 	.close = ipu_isys_subdev_close,
 };
 
-int ipu_isys_csi2_get_link_freq(struct ipu_isys_csi2 *csi2, __s64 *link_freq)
+int ipu_isys_csi2_get_link_freq(struct ipu_isys_csi2 *csi2, s64 *link_freq)
 {
 	struct ipu_isys_pipeline *pipe = container_of(csi2->asd.sd.entity.pipe,
 						      struct ipu_isys_pipeline,
 						      pipe);
 	struct v4l2_subdev *ext_sd =
-	    media_entity_to_v4l2_subdev(pipe->external->entity);
-	struct v4l2_ext_control c = {.id = V4L2_CID_LINK_FREQ, };
-	struct v4l2_ext_controls cs = {.count = 1,
-		.controls = &c,
-	};
-	struct v4l2_querymenu qm = {.id = c.id, };
-	int rval;
+		media_entity_to_v4l2_subdev(pipe->external->entity);
+	struct device *dev = &csi2->isys->adev->dev;
+	unsigned int bpp, lanes;
+	s64 ret;
 
 	if (!ext_sd) {
 		WARN_ON(1);
 		return -ENODEV;
 	}
-	rval = v4l2_g_ext_ctrls(ext_sd->ctrl_handler,
-				ext_sd->devnode,
-				ext_sd->v4l2_dev->mdev,
-				&cs);
-	if (rval) {
-		dev_info(&csi2->isys->adev->dev, "can't get link frequency\n");
-		return rval;
+
+	bpp = ipu_isys_mbus_code_to_bpp(csi2->asd.ffmt->code);
+	lanes = csi2->nlanes;
+
+	ret = v4l2_get_link_freq(ext_sd->ctrl_handler, bpp, lanes * 2);
+	if (ret < 0) {
+		dev_err(dev, "can't get link frequency (%lld)\n", ret);
+		return ret;
 	}
 
-	qm.index = c.value;
+	dev_dbg(dev, "link freq of %s is %lld\n", ext_sd->name, ret);
+	*link_freq = ret;
 
-	rval = v4l2_querymenu(ext_sd->ctrl_handler, &qm);
-	if (rval) {
-		dev_info(&csi2->isys->adev->dev, "can't get menu item\n");
-		return rval;
-	}
-
-	dev_dbg(&csi2->isys->adev->dev, "%s: link frequency %lld\n", __func__,
-		qm.value);
-
-	if (!qm.value)
-		return -EINVAL;
-	*link_freq = qm.value;
 	return 0;
 }
 
@@ -314,17 +301,17 @@ static const struct v4l2_subdev_video_ops csi2_sd_video_ops = {
 };
 
 static int ipu_isys_csi2_get_fmt(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *state,
 				 struct v4l2_subdev_format *fmt)
 {
-	return ipu_isys_subdev_get_ffmt(sd, cfg, fmt);
+	return ipu_isys_subdev_get_ffmt(sd, state, fmt);
 }
 
 static int ipu_isys_csi2_set_fmt(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *state,
 				 struct v4l2_subdev_format *fmt)
 {
-	return ipu_isys_subdev_set_ffmt(sd, cfg, fmt);
+	return ipu_isys_subdev_set_ffmt(sd, state, fmt);
 }
 
 static int __subdev_link_validate(struct v4l2_subdev *sd,
@@ -360,12 +347,12 @@ static struct media_entity_operations csi2_entity_ops = {
 };
 
 static void csi2_set_ffmt(struct v4l2_subdev *sd,
-			  struct v4l2_subdev_pad_config *cfg,
+			  struct v4l2_subdev_state *state,
 			  struct v4l2_subdev_format *fmt)
 {
 	enum isys_subdev_prop_tgt tgt = IPU_ISYS_SUBDEV_PROP_TGT_SINK_FMT;
 	struct v4l2_mbus_framefmt *ffmt =
-		__ipu_isys_get_ffmt(sd, cfg, fmt->pad,
+		__ipu_isys_get_ffmt(sd, state, fmt->pad,
 				    fmt->which);
 
 	if (fmt->format.field != V4L2_FIELD_ALTERNATE)
@@ -373,7 +360,7 @@ static void csi2_set_ffmt(struct v4l2_subdev *sd,
 
 	if (fmt->pad == CSI2_PAD_SINK) {
 		*ffmt = fmt->format;
-		ipu_isys_subdev_fmt_propagate(sd, cfg, &fmt->format, NULL,
+		ipu_isys_subdev_fmt_propagate(sd, state, &fmt->format, NULL,
 					      tgt, fmt->pad, fmt->which);
 		return;
 	}

@@ -141,6 +141,7 @@ static int fsl_asrc_dma_hw_params(struct snd_soc_component *component,
 	struct dma_slave_config config_fe, config_be;
 	enum asrc_pair_index index = pair->index;
 	struct device *dev = component->dev;
+	struct device_node *of_dma_node;
 	int stream = substream->stream;
 	struct imx_dma_data *tmp_data;
 	struct snd_soc_dpcm *dpcm;
@@ -207,14 +208,19 @@ static int fsl_asrc_dma_hw_params(struct snd_soc_component *component,
 		be_chan = soc_component_to_pcm(component_be)->chan[substream->stream];
 		tmp_chan = be_chan;
 	}
-	if (!tmp_chan)
-		tmp_chan = dma_request_slave_channel(dev_be, tx ? "tx" : "rx");
+	if (!tmp_chan) {
+		tmp_chan = dma_request_chan(dev_be, tx ? "tx" : "rx");
+		if (IS_ERR(tmp_chan)) {
+			dev_err(dev, "failed to request DMA channel for Back-End\n");
+			return -EINVAL;
+		}
+	}
 
 	/*
 	 * An EDMA DEV_TO_DEV channel is fixed and bound with DMA event of each
 	 * peripheral, unlike SDMA channel that is allocated dynamically. So no
 	 * need to configure dma_request and dma_request2, but get dma_chan of
-	 * Back-End device directly via dma_request_slave_channel.
+	 * Back-End device directly via dma_request_chan.
 	 */
 	if (!asrc->use_edma) {
 		/* Get DMA request of Back-End */
@@ -231,8 +237,10 @@ static int fsl_asrc_dma_hw_params(struct snd_soc_component *component,
 		pair->dma_data.priority = tmp_data->priority;
 		dma_release_channel(tmp_chan);
 
+		of_dma_node = pair->dma_chan[!dir]->device->dev->of_node;
 		pair->dma_chan[dir] =
-			dma_request_channel(mask, filter, &pair->dma_data);
+			__dma_request_channel(&mask, filter, &pair->dma_data,
+					      of_dma_node);
 		pair->req_dma_chan = true;
 	} else {
 		pair->dma_chan[dir] = tmp_chan;
@@ -281,8 +289,6 @@ static int fsl_asrc_dma_hw_params(struct snd_soc_component *component,
 		return ret;
 	}
 
-	snd_pcm_set_runtime_buffer(substream, &substream->dma_buffer);
-
 	return 0;
 }
 
@@ -293,8 +299,6 @@ static int fsl_asrc_dma_hw_free(struct snd_soc_component *component,
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct fsl_asrc_pair *pair = runtime->private_data;
 	u8 dir = tx ? OUT : IN;
-
-	snd_pcm_set_runtime_buffer(substream, NULL);
 
 	if (pair->dma_chan[!dir])
 		dma_release_channel(pair->dma_chan[!dir]);
@@ -420,9 +424,8 @@ static int fsl_asrc_dma_pcm_new(struct snd_soc_component *component,
 				struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_card *card = rtd->card->snd_card;
-	struct snd_pcm_substream *substream;
 	struct snd_pcm *pcm = rtd->pcm;
-	int ret, i;
+	int ret;
 
 	ret = dma_coerce_mask_and_coherent(card->dev, DMA_BIT_MASK(32));
 	if (ret) {
@@ -430,43 +433,8 @@ static int fsl_asrc_dma_pcm_new(struct snd_soc_component *component,
 		return ret;
 	}
 
-	for_each_pcm_streams(i) {
-		substream = pcm->streams[i].substream;
-		if (!substream)
-			continue;
-
-		ret = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, pcm->card->dev,
-				FSL_ASRC_DMABUF_SIZE, &substream->dma_buffer);
-		if (ret) {
-			dev_err(card->dev, "failed to allocate DMA buffer\n");
-			goto err;
-		}
-	}
-
-	return 0;
-
-err:
-	if (--i == 0 && pcm->streams[i].substream)
-		snd_dma_free_pages(&pcm->streams[i].substream->dma_buffer);
-
-	return ret;
-}
-
-static void fsl_asrc_dma_pcm_free(struct snd_soc_component *component,
-				  struct snd_pcm *pcm)
-{
-	struct snd_pcm_substream *substream;
-	int i;
-
-	for_each_pcm_streams(i) {
-		substream = pcm->streams[i].substream;
-		if (!substream)
-			continue;
-
-		snd_dma_free_pages(&substream->dma_buffer);
-		substream->dma_buffer.area = NULL;
-		substream->dma_buffer.addr = 0;
-	}
+	return snd_pcm_set_fixed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
+					    card->dev, FSL_ASRC_DMABUF_SIZE);
 }
 
 struct snd_soc_component_driver fsl_asrc_component = {
@@ -478,6 +446,6 @@ struct snd_soc_component_driver fsl_asrc_component = {
 	.close		= fsl_asrc_dma_shutdown,
 	.pointer	= fsl_asrc_dma_pcm_pointer,
 	.pcm_construct	= fsl_asrc_dma_pcm_new,
-	.pcm_destruct	= fsl_asrc_dma_pcm_free,
+	.legacy_dai_naming = 1,
 };
 EXPORT_SYMBOL_GPL(fsl_asrc_component);

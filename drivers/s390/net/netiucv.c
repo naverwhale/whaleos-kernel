@@ -118,24 +118,6 @@ static struct device_driver netiucv_driver = {
 	.bus  = &iucv_bus,
 };
 
-static int netiucv_callback_connreq(struct iucv_path *, u8 *, u8 *);
-static void netiucv_callback_connack(struct iucv_path *, u8 *);
-static void netiucv_callback_connrej(struct iucv_path *, u8 *);
-static void netiucv_callback_connsusp(struct iucv_path *, u8 *);
-static void netiucv_callback_connres(struct iucv_path *, u8 *);
-static void netiucv_callback_rx(struct iucv_path *, struct iucv_message *);
-static void netiucv_callback_txdone(struct iucv_path *, struct iucv_message *);
-
-static struct iucv_handler netiucv_handler = {
-	.path_pending	  = netiucv_callback_connreq,
-	.path_complete	  = netiucv_callback_connack,
-	.path_severed	  = netiucv_callback_connrej,
-	.path_quiesced	  = netiucv_callback_connsusp,
-	.path_resumed	  = netiucv_callback_connres,
-	.message_pending  = netiucv_callback_rx,
-	.message_complete = netiucv_callback_txdone
-};
-
 /**
  * Per connection profiling data
  */
@@ -774,6 +756,16 @@ static void conn_action_txdone(fsm_instance *fi, int event, void *arg)
 	}
 }
 
+static struct iucv_handler netiucv_handler = {
+	.path_pending	  = netiucv_callback_connreq,
+	.path_complete	  = netiucv_callback_connack,
+	.path_severed	  = netiucv_callback_connrej,
+	.path_quiesced	  = netiucv_callback_connsusp,
+	.path_resumed	  = netiucv_callback_connres,
+	.message_pending  = netiucv_callback_rx,
+	.message_complete = netiucv_callback_txdone,
+};
+
 static void conn_action_connaccept(fsm_instance *fi, int event, void *arg)
 {
 	struct iucv_event *ev = arg;
@@ -1260,15 +1252,8 @@ static int netiucv_close(struct net_device *dev)
 /**
  * Start transmission of a packet.
  * Called from generic network device layer.
- *
- * @param skb Pointer to buffer containing the packet.
- * @param dev Pointer to interface struct.
- *
- * @return 0 if packet consumed, !0 if packet rejected.
- *         Note: If we return !0, then the packet is free'd by
- *               the generic network layer.
  */
-static int netiucv_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t netiucv_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct netiucv_priv *privptr = netdev_priv(dev);
 	int rc;

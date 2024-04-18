@@ -1,116 +1,112 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  *
  * Copyright (c) 2021, MediaTek Inc.
- * Copyright (c) 2021, Intel Corporation.
+ * Copyright (c) 2021-2022, Intel Corporation.
+ *
+ * Authors:
+ *  Amir Hanania <amir.hanania@intel.com>
+ *  Haijun Liu <haijun.liu@mediatek.com>
+ *  Moises Veleta <moises.veleta@intel.com>
+ *  Ricardo Martinez <ricardo.martinez@linux.intel.com>
+ *
+ * Contributors:
+ *  Chiranjeevi Rapolu <chiranjeevi.rapolu@intel.com>
+ *  Eliot Lee <eliot.lee@intel.com>
+ *  Sreehari Kancharla <sreehari.kancharla@intel.com>
  */
 
 #ifndef __T7XX_PORT_PROXY_H__
 #define __T7XX_PORT_PROXY_H__
 
-#include <net/sock.h>
+#include <linux/bits.h>
+#include <linux/device.h>
+#include <linux/skbuff.h>
+#include <linux/types.h>
 
-#include "t7xx_common.h"
-#include "t7xx_port.h"
 #include "t7xx_hif_cldma.h"
 #include "t7xx_modem_ops.h"
+#include "t7xx_port.h"
 
-/* ccci logic channel enable & disable flag */
-#define CCCI_CHAN_ENABLE	1
-#define CCCI_CHAN_DISABLE	0
+#define MTK_QUEUES		16
+#define RX_QUEUE_MAXLEN		32
+#define CTRL_QUEUE_MAXLEN	16
 
-#define MAX_QUEUE_NUM		16
-#define PORT_STATE_ENABLE	0
-#define PORT_STATE_DISABLE	1
-#define PORT_STATE_INVALID	2
-
-#define CCCI_MTU            3568 /* 3.5kB -16 */
-
-/* error number definition */
-#define EDROPPACKET	216
-#define ERXFULL		217
-
-enum {
-	CRIT_USR_MUXD = 1,
-	CRIT_USR_MDLOG,
-	CRIT_USR_META,
+enum port_cfg_id {
+	PORT_CFG_ID_INVALID,
+	PORT_CFG_ID_NORMAL,
+	PORT_CFG_ID_EARLY,
 };
 
 struct port_proxy {
-	int			port_number;
-	unsigned int		major;
-	unsigned int		minor_base;
-	unsigned int		critical_user_active;
-	/* do NOT use this manner, otherwise spinlock inside private_data
-	 * will trigger alignment exception
-	 */
-	struct t7xx_port		*ports;
-	struct t7xx_port		*ctl_port;
-	struct t7xx_port		*dedicated_ports[CLDMA_NUM][MAX_QUEUE_NUM];
-	/* port list of each Rx channel, for Rx dispatching */
-	struct list_head	rx_ch_ports[CCCI_MAX_CH_ID];
-	/* port list of each queue for receiving queue status dispatching */
-	struct list_head	queue_ports[CLDMA_NUM][MAX_QUEUE_NUM];
-	struct sock		*netlink_sock;
+	int			port_count;
+	struct list_head	rx_ch_ports[PORT_CH_ID_MASK + 1];
+	struct list_head	queue_ports[CLDMA_NUM][MTK_QUEUES];
+	struct device		*dev;
+	enum port_cfg_id	cfg_id;
+	struct t7xx_port	*ports;
 };
 
+struct ccci_header {
+	__le32 packet_header;
+	__le32 packet_len;
+	__le32 status;
+	__le32 ex_msg;
+};
+
+/* Coupled with HW - indicates if there is data following the CCCI header or not */
+#define CCCI_HEADER_NO_DATA	0xffffffff
+
+#define CCCI_H_AST_BIT		BIT(31)
+#define CCCI_H_SEQ_FLD		GENMASK(30, 16)
+#define CCCI_H_CHN_FLD		GENMASK(15, 0)
+
 struct ctrl_msg_header {
-	u32 ctrl_msg_id;
-	u32 reserved;
-	u32 data_length;
-	u8 data[0];
-} __packed;
+	__le32	ctrl_msg_id;
+	__le32	ex_msg;
+	__le32	data_length;
+};
 
-struct port_info {
-	u32 ch_id:15;
-	u32 en_flag:1; /* 1:enable, 0:disable */
-	u32 reserved:16; /* no use now */
-} __packed;
+/* Control identification numbers for AP<->MD messages  */
+#define CTL_ID_HS1_MSG		0x0
+#define CTL_ID_HS2_MSG		0x1
+#define CTL_ID_HS3_MSG		0x2
+#define CTL_ID_MD_EX		0x4
+#define CTL_ID_DRV_VER_ERROR	0x5
+#define CTL_ID_MD_EX_ACK	0x6
+#define CTL_ID_MD_EX_PASS	0x8
+#define CTL_ID_PORT_ENUM	0x9
 
-struct port_msg {
-	u32 head_pattern;
-	u32 port_count:16;
-	u32 version:16;
-	u32 tail_pattern;
-	u8 data[0]; /* port set info */
-} __packed;
+/* Modem exception check identification code - "EXCP" */
+#define MD_EX_CHK_ID		0x45584350
+/* Modem exception check acknowledge identification code - "EREC" */
+#define MD_EX_CHK_ACK_ID	0x45524543
 
-#define PORT_ENUM_VER 0
-#define PORT_ENUM_HEAD_PATTERN 0x5a5a5a5a
-#define PORT_ENUM_TAIL_PATTERN 0xa5a5a5a5
-#define PORT_ENUM_VER_DISMATCH 0x00657272
+#define PORT_INFO_RSRVD		GENMASK(31, 16)
+#define PORT_INFO_ENFLG		BIT(15)
+#define PORT_INFO_CH_ID		GENMASK(14, 0)
 
-int port_recv_skb_from_dedicatedQ(enum cldma_id hif_id, unsigned char qno,
-				  struct sk_buff *skb);
-int ccci_port_send_hif(struct t7xx_port *port, struct sk_buff *skb,
-		       unsigned char from_pool, unsigned char blocking);
-void port_inc_tx_seq_num(struct t7xx_port *port, struct ccci_header *ccci_h);
-int ccci_port_node_control(void *data);
-void port_reset(void);
-int port_broadcast_state(struct t7xx_port *port, int state);
-void proxy_send_msg_to_md(int ch, unsigned int msg, unsigned int resv, int blocking);
-int proxy_dispatch_recv_skb(enum cldma_id hif_id, struct sk_buff *skb);
+#define PORT_ENUM_VER		0
+#define PORT_ENUM_HEAD_PATTERN	0x5a5a5a5a
+#define PORT_ENUM_TAIL_PATTERN	0xa5a5a5a5
+#define PORT_ENUM_VER_MISMATCH	0x00657272
 
-/* This API is called by ccci_modem,
- * and used to create all ccci port instance
- */
-int ccci_port_init(struct ccci_modem *md);
+/* Port operations mapping */
+extern struct port_ops wwan_sub_port_ops;
+extern struct port_ops ctl_port_ops;
+extern struct port_ops devlink_port_ops;
 
-int ccci_port_uninit(void);
+#ifdef CONFIG_WWAN_DEBUGFS
+extern struct port_ops t7xx_trace_port_ops;
+#endif
 
-/* This API is called by ccci_fsm,
- * and used to dispatch modem status for related port
- */
-void ccci_port_md_status_notify(unsigned int state);
-
-/* This API is called by ccci fsm,
- * and used to get critical user status.
- */
-int ccci_port_get_critical_user(unsigned int user_id);
-
-/* This API is called by ccci fsm,
- * and used to send a ccci msg for modem.
- */
-int ccci_port_send_msg_to_md(int ch, unsigned int msg,
-			     unsigned int resv, int blocking);
+void t7xx_port_proxy_reset(struct port_proxy *port_prox);
+void t7xx_port_proxy_uninit(struct port_proxy *port_prox);
+int t7xx_port_proxy_init(struct t7xx_modem *md);
+void t7xx_port_proxy_md_status_notify(struct port_proxy *port_prox, unsigned int state);
+int t7xx_port_enum_msg_handler(struct t7xx_modem *md, void *msg);
+int t7xx_port_proxy_chl_enable_disable(struct port_proxy *port_prox, unsigned int ch_id,
+				       bool en_flag);
+struct t7xx_port *t7xx_port_proxy_get_port_by_name(struct port_proxy *port_prox, char *port_name);
+void t7xx_port_proxy_set_cfg(struct t7xx_modem *md, enum port_cfg_id cfg_id);
 
 #endif /* __T7XX_PORT_PROXY_H__ */

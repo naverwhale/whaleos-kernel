@@ -184,8 +184,9 @@ struct fsxattr {
 #define BLKSECDISCARD _IO(0x12,125)
 #define BLKROTATIONAL _IO(0x12,126)
 #define BLKZEROOUT _IO(0x12,127)
+#define BLKGETDISKSEQ _IOR(0x12,128,__u64)
 /*
- * A jump here: 130-131 are reserved for zoned block devices
+ * A jump here: 130-136 are reserved for zoned block devices
  * (see uapi/linux/blkzoned.h)
  */
 
@@ -200,13 +201,6 @@ struct fsxattr {
 #define FIDEDUPERANGE	_IOWR(0x94, 54, struct file_dedupe_range)
 
 #define FSLABEL_MAX 256	/* Max chars for the interface; each fs may differ */
-
-/*
- * This IOCTL has been added as a workaround for cryptohome to clear
- * cached unencrypted user data on logout.
- * Drop caches for a superblock
- */
-#define	FS_IOC_DROP_CACHE		_IO('f', 129)
 
 #define	FS_IOC_GETFLAGS			_IOR('f', 1, long)
 #define	FS_IOC_SETFLAGS			_IOW('f', 2, long)

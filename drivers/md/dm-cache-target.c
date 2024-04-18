@@ -8,6 +8,7 @@
 #include "dm-bio-prison-v2.h"
 #include "dm-bio-record.h"
 #include "dm-cache-metadata.h"
+#include "dm-io-tracker.h"
 
 #include <linux/dm-io.h>
 #include <linux/dm-kcopyd.h>
@@ -36,77 +37,6 @@ DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
  * migration: movement of a block between the origin and cache device,
  *	      either direction
  */
-
-/*----------------------------------------------------------------*/
-
-struct io_tracker {
-	spinlock_t lock;
-
-	/*
-	 * Sectors of in-flight IO.
-	 */
-	sector_t in_flight;
-
-	/*
-	 * The time, in jiffies, when this device became idle (if it is
-	 * indeed idle).
-	 */
-	unsigned long idle_time;
-	unsigned long last_update_time;
-};
-
-static void iot_init(struct io_tracker *iot)
-{
-	spin_lock_init(&iot->lock);
-	iot->in_flight = 0ul;
-	iot->idle_time = 0ul;
-	iot->last_update_time = jiffies;
-}
-
-static bool __iot_idle_for(struct io_tracker *iot, unsigned long jifs)
-{
-	if (iot->in_flight)
-		return false;
-
-	return time_after(jiffies, iot->idle_time + jifs);
-}
-
-static bool iot_idle_for(struct io_tracker *iot, unsigned long jifs)
-{
-	bool r;
-
-	spin_lock_irq(&iot->lock);
-	r = __iot_idle_for(iot, jifs);
-	spin_unlock_irq(&iot->lock);
-
-	return r;
-}
-
-static void iot_io_begin(struct io_tracker *iot, sector_t len)
-{
-	spin_lock_irq(&iot->lock);
-	iot->in_flight += len;
-	spin_unlock_irq(&iot->lock);
-}
-
-static void __iot_io_end(struct io_tracker *iot, sector_t len)
-{
-	if (!len)
-		return;
-
-	iot->in_flight -= len;
-	if (!iot->in_flight)
-		iot->idle_time = jiffies;
-}
-
-static void iot_io_end(struct io_tracker *iot, sector_t len)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&iot->lock, flags);
-	__iot_io_end(iot, len);
-	spin_unlock_irqrestore(&iot->lock, flags);
-}
 
 /*----------------------------------------------------------------*/
 
@@ -470,7 +400,7 @@ struct cache {
 	struct batcher committer;
 	struct work_struct commit_ws;
 
-	struct io_tracker tracker;
+	struct dm_io_tracker tracker;
 
 	mempool_t migration_pool;
 
@@ -866,7 +796,7 @@ static void accounted_begin(struct cache *cache, struct bio *bio)
 	if (accountable_bio(cache, bio)) {
 		pb = get_per_bio_data(bio);
 		pb->len = bio_sectors(bio);
-		iot_io_begin(&cache->tracker, pb->len);
+		dm_iot_io_begin(&cache->tracker, pb->len);
 	}
 }
 
@@ -874,7 +804,7 @@ static void accounted_complete(struct cache *cache, struct bio *bio)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio);
 
-	iot_io_end(&cache->tracker, pb->len);
+	dm_iot_io_end(&cache->tracker, pb->len);
 }
 
 static void accounted_request(struct cache *cache, struct bio *bio)
@@ -985,14 +915,14 @@ static void abort_transaction(struct cache *cache)
 	if (get_cache_mode(cache) >= CM_READ_ONLY)
 		return;
 
-	if (dm_cache_metadata_set_needs_check(cache->cmd)) {
-		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
-		set_cache_mode(cache, CM_FAIL);
-	}
-
 	DMERR_LIMIT("%s: aborting current metadata transaction", dev_name);
 	if (dm_cache_metadata_abort(cache->cmd)) {
 		DMERR("%s: failed to abort metadata transaction", dev_name);
+		set_cache_mode(cache, CM_FAIL);
+	}
+
+	if (dm_cache_metadata_set_needs_check(cache->cmd)) {
+		DMERR("%s: failed to set 'needs_check' flag in metadata", dev_name);
 		set_cache_mode(cache, CM_FAIL);
 	}
 }
@@ -1642,7 +1572,7 @@ enum busy {
 
 static enum busy spare_migration_bandwidth(struct cache *cache)
 {
-	bool idle = iot_idle_for(&cache->tracker, HZ);
+	bool idle = dm_iot_idle_for(&cache->tracker, HZ);
 	sector_t current_volume = (atomic_read(&cache->nr_io_migrations) + 1) *
 		cache->sectors_per_block;
 
@@ -1883,6 +1813,7 @@ static void process_deferred_bios(struct work_struct *ws)
 
 		else
 			commit_needed = process_bio(cache, bio) || commit_needed;
+		cond_resched();
 	}
 
 	if (commit_needed)
@@ -1905,6 +1836,7 @@ static void requeue_deferred_bios(struct cache *cache)
 	while ((bio = bio_list_pop(&bios))) {
 		bio->bi_status = BLK_STS_DM_REQUEUE;
 		bio_endio(bio);
+		cond_resched();
 	}
 }
 
@@ -1945,6 +1877,8 @@ static void check_migrations(struct work_struct *ws)
 		r = mg_start(cache, op, NULL);
 		if (r)
 			break;
+
+		cond_resched();
 	}
 }
 
@@ -1965,6 +1899,7 @@ static void destroy(struct cache *cache)
 	if (cache->prison)
 		dm_bio_prison_destroy_v2(cache->prison);
 
+	cancel_delayed_work_sync(&cache->waker);
 	if (cache->wq)
 		destroy_workqueue(cache->wq);
 
@@ -2603,7 +2538,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	batcher_init(&cache->committer, commit_op, cache,
 		     issue_op, cache, cache->wq);
-	iot_init(&cache->tracker);
+	dm_iot_init(&cache->tracker);
 
 	init_rwsem(&cache->background_work_lock);
 	prevent_background_work(cache);
@@ -2840,7 +2775,6 @@ static void cache_postsuspend(struct dm_target *ti)
 static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
 			bool dirty, uint32_t hint, bool hint_valid)
 {
-	int r;
 	struct cache *cache = context;
 
 	if (dirty) {
@@ -2849,11 +2783,7 @@ static int load_mapping(void *context, dm_oblock_t oblock, dm_cblock_t cblock,
 	} else
 		clear_bit(from_cblock(cblock), cache->dirty_bitset);
 
-	r = policy_load_mapping(cache->policy, oblock, cblock, dirty, hint, hint_valid);
-	if (r)
-		return r;
-
-	return 0;
+	return policy_load_mapping(cache->policy, oblock, cblock, dirty, hint, hint_valid);
 }
 
 /*
@@ -3197,6 +3127,30 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 			DMEMIT(" %s", cache->ctr_args[i]);
 		if (cache->nr_ctr_args)
 			DMEMIT(" %s", cache->ctr_args[cache->nr_ctr_args - 1]);
+		break;
+
+	case STATUSTYPE_IMA:
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		if (get_cache_mode(cache) == CM_FAIL)
+			DMEMIT(",metadata_mode=fail");
+		else if (get_cache_mode(cache) == CM_READ_ONLY)
+			DMEMIT(",metadata_mode=ro");
+		else
+			DMEMIT(",metadata_mode=rw");
+
+		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
+		DMEMIT(",cache_metadata_device=%s", buf);
+		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
+		DMEMIT(",cache_device=%s", buf);
+		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
+		DMEMIT(",cache_origin_device=%s", buf);
+		DMEMIT(",writethrough=%c", writethrough_mode(cache) ? 'y' : 'n');
+		DMEMIT(",writeback=%c", writeback_mode(cache) ? 'y' : 'n');
+		DMEMIT(",passthrough=%c", passthrough_mode(cache) ? 'y' : 'n');
+		DMEMIT(",metadata2=%c", cache->features.metadata_version == 2 ? 'y' : 'n');
+		DMEMIT(",no_discard_passdown=%c", cache->features.discard_passdown ? 'n' : 'y');
+		DMEMIT(";");
+		break;
 	}
 
 	return;
@@ -3392,7 +3346,7 @@ static bool origin_dev_supports_discard(struct block_device *origin_bdev)
 {
 	struct request_queue *q = bdev_get_queue(origin_bdev);
 
-	return q && blk_queue_discard(q);
+	return blk_queue_discard(q);
 }
 
 /*

@@ -28,6 +28,8 @@
 #define PCH_THERMAL_DID_CNL_H	0xA379 /* CNL-H PCH */
 #define PCH_THERMAL_DID_CNL_LP	0x02F9 /* CNL-LP PCH */
 #define PCH_THERMAL_DID_CML_H	0X06F9 /* CML-H PCH */
+#define PCH_THERMAL_DID_LWB	0xA1B1 /* Lewisburg PCH */
+#define PCH_THERMAL_DID_WBG	0x8D24 /* Wellsburg PCH */
 
 /* Wildcat Point-LP  PCH Thermal registers */
 #define WPT_TEMP	0x0000	/* Temperature */
@@ -166,8 +168,7 @@ read_trips:
 	trip_temp = readw(ptd->hw_base + WPT_CTT);
 	trip_temp &= 0x1FF;
 	if (trip_temp) {
-		/* Resolution of 1/2 degree C and an offset of -50C */
-		ptd->crt_temp = trip_temp * 1000 / 2 - 50000;
+		ptd->crt_temp = GET_WPT_TEMP(trip_temp);
 		ptd->crt_trip_id = 0;
 		++(*nr_trips);
 	}
@@ -176,8 +177,7 @@ read_trips:
 	trip_temp = readw(ptd->hw_base + WPT_PHL);
 	trip_temp &= 0x1FF;
 	if (trip_temp) {
-		/* Resolution of 1/2 degree C and an offset of -50C */
-		ptd->hot_temp = trip_temp * 1000 / 2 - 50000;
+		ptd->hot_temp = GET_WPT_TEMP(trip_temp);
 		ptd->hot_trip_id = *nr_trips;
 		++(*nr_trips);
 	}
@@ -189,12 +189,7 @@ read_trips:
 
 static int pch_wpt_get_temp(struct pch_thermal_device *ptd, int *temp)
 {
-	u16 wpt_temp;
-
-	wpt_temp = WPT_TEMP_TSR & readw(ptd->hw_base + WPT_TEMP);
-
-	/* Resolution of 1/2 degree C and an offset of -50C */
-	*temp = (wpt_temp * 1000 / 2 - 50000);
+	*temp = GET_WPT_TEMP(WPT_TEMP_TSR & readw(ptd->hw_base + WPT_TEMP));
 
 	return 0;
 }
@@ -332,10 +327,16 @@ static int pch_get_trip_temp(struct thermal_zone_device *tzd, int trip, int *tem
 	return 0;
 }
 
+static void pch_critical(struct thermal_zone_device *tzd)
+{
+	dev_dbg(&tzd->device, "%s: critical temperature reached\n", tzd->type);
+}
+
 static struct thermal_zone_device_ops tzd_ops = {
 	.get_temp = pch_thermal_get_temp,
 	.get_trip_type = pch_get_trip_type,
 	.get_trip_temp = pch_get_trip_temp,
+	.critical = pch_critical,
 };
 
 enum board_ids {
@@ -344,6 +345,8 @@ enum board_ids {
 	board_skl,
 	board_cnl,
 	board_cml,
+	board_lwb,
+	board_wbg,
 };
 
 static const struct board_info {
@@ -369,7 +372,15 @@ static const struct board_info {
 	[board_cml] = {
 		.name = "pch_cometlake",
 		.ops = &pch_dev_ops_wpt,
-	}
+	},
+	[board_lwb] = {
+		.name = "pch_lewisburg",
+		.ops = &pch_dev_ops_wpt,
+	},
+	[board_wbg] = {
+		.name = "pch_wellsburg",
+		.ops = &pch_dev_ops_wpt,
+	},
 };
 
 static int intel_pch_thermal_probe(struct pci_dev *pdev,
@@ -483,6 +494,10 @@ static const struct pci_device_id intel_pch_thermal_id[] = {
 		.driver_data = board_cnl, },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCH_THERMAL_DID_CML_H),
 		.driver_data = board_cml, },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCH_THERMAL_DID_LWB),
+		.driver_data = board_lwb, },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCH_THERMAL_DID_WBG),
+		.driver_data = board_wbg, },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, intel_pch_thermal_id);

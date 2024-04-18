@@ -17,13 +17,9 @@
  */
 
 #include "evdi_platform_dev.h"
-#include <linux/version.h>
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
-#include <linux/iommu.h>
-#endif
 
 #include "evdi_platform_drv.h"
 #include "evdi_debug.h"
@@ -41,8 +37,8 @@ struct platform_device *evdi_platform_dev_create(struct platform_device_info *in
 
 	platform_dev = platform_device_register_full(info);
 	if (dma_set_mask(&platform_dev->dev, DMA_BIT_MASK(64))) {
-		EVDI_DEBUG("Unable to change dma mask to 64 bit. ");
-		EVDI_DEBUG("Sticking with 32 bit\n");
+		EVDI_WARN("Unable to change dma mask to 64 bit. ");
+		EVDI_WARN("Sticking with 32 bit\n");
 	}
 
 	EVDI_INFO("Evdi platform_device create\n");
@@ -61,27 +57,10 @@ int evdi_platform_device_probe(struct platform_device *pdev)
 	struct drm_device *dev;
 	struct evdi_platform_device_data *data;
 
-#if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
-#if IS_ENABLED(CONFIG_IOMMU_API) && defined(CONFIG_INTEL_IOMMU)
-	struct dev_iommu iommu;
-#endif
-#endif
 	EVDI_CHECKPT();
-
 	data = kzalloc(sizeof(struct evdi_platform_device_data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
-/* Intel-IOMMU workaround: platform-bus unsupported, force ID-mapping */
-#if IS_ENABLED(CONFIG_IOMMU_API) && defined(CONFIG_INTEL_IOMMU)
-#if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
-	memset(&iommu, 0, sizeof(iommu));
-	iommu.priv = (void *)-1;
-	pdev->dev.iommu = &iommu;
-#else
-#define INTEL_IOMMU_DUMMY_DOMAIN                ((void *)-1)
-	pdev->dev.archdata.iommu = INTEL_IOMMU_DUMMY_DOMAIN;
-#endif
-#endif
 
 	dev = evdi_drm_device_create(&pdev->dev);
 	if (IS_ERR_OR_NULL(dev))

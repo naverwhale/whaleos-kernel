@@ -2167,10 +2167,10 @@ static int hrz_open (struct atm_vcc *atm_vcc)
   
   // Part of the job is done by atm_pcr_goal which gives us a PCR
   // specification which says: EITHER grab the maximum available PCR
-  // (and perhaps a lower bound which we musn't pass), OR grab this
+  // (and perhaps a lower bound which we must not pass), OR grab this
   // amount, rounding down if you have to (and perhaps a lower bound
-  // which we musn't pass) OR grab this amount, rounding up if you
-  // have to (and perhaps an upper bound which we musn't pass). If any
+  // which we must not pass) OR grab this amount, rounding up if you
+  // have to (and perhaps an upper bound which we must not pass). If any
   // bounds ARE passed we fail. Note that rounding is only rounding to
   // match device limitations, we do not round down to satisfy
   // bandwidth availability even if this would not violate any given
@@ -2765,7 +2765,7 @@ static void hrz_remove_one(struct pci_dev *pci_dev)
 	dev = pci_get_drvdata(pci_dev);
 
 	PRINTD(DBG_INFO, "closing %p (atm_dev = %p)", dev, dev->atm_dev);
-	del_timer_sync(&dev->housekeeping);
+	timer_shutdown_sync(&dev->housekeeping);
 	hrz_reset(dev);
 	atm_dev_deregister(dev->atm_dev);
 	free_irq(dev->irq, dev);

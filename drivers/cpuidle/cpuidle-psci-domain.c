@@ -182,7 +182,8 @@ static void psci_pd_remove(void)
 	struct psci_pd_provider *pd_provider, *it;
 	struct generic_pm_domain *genpd;
 
-	list_for_each_entry_safe(pd_provider, it, &psci_pd_providers, link) {
+	list_for_each_entry_safe_reverse(pd_provider, it,
+					 &psci_pd_providers, link) {
 		of_genpd_del_provider(pd_provider->node);
 
 		genpd = of_genpd_remove_last(pd_provider->node);
@@ -326,6 +327,8 @@ struct device *psci_dt_attach_cpu(int cpu)
 	pm_runtime_irq_safe(dev);
 	if (cpu_online(cpu))
 		pm_runtime_get_sync(dev);
+
+	dev_pm_syscore_device(dev, true);
 
 	return dev;
 }

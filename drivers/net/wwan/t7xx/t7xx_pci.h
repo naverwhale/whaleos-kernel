@@ -1,51 +1,94 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  *
  * Copyright (c) 2021, MediaTek Inc.
- * Copyright (c) 2021, Intel Corporation.
+ * Copyright (c) 2021-2022, Intel Corporation.
+ *
+ * Authors:
+ *  Haijun Liu <haijun.liu@mediatek.com>
+ *  Ricardo Martinez <ricardo.martinez@linux.intel.com>
+ *  Sreehari Kancharla <sreehari.kancharla@intel.com>
+ *
+ * Contributors:
+ *  Amir Hanania <amir.hanania@intel.com>
+ *  Chiranjeevi Rapolu <chiranjeevi.rapolu@intel.com>
+ *  Moises Veleta <moises.veleta@intel.com>
  */
 
 #ifndef __T7XX_PCI_H__
 #define __T7XX_PCI_H__
 
+#include <linux/completion.h>
+#include <linux/irqreturn.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
 
-struct mtk_pci_dev;
 #include "t7xx_reg.h"
-#include "t7xx_pci_ats.h"
 
-#define MTK_PCI_WQ_DESCR	"ccci_wq"
-
-enum mtk_pcie_state_t {
-	PCIE_EP2RC_SW_INT,
-	PCIE_A_ATR_INT,
-	PCIE_P_ATR_INT,
-	PCIE_SERVICE_SCHED,
+/* struct t7xx_addr_base - holds base addresses
+ * @pcie_mac_ireg_base: PCIe MAC register base
+ * @pcie_ext_reg_base: used to calculate base addresses for CLDMA, DPMA and MHCCIF registers
+ * @pcie_dev_reg_trsl_addr: used to calculate the register base address
+ * @infracfg_ao_base: base address used in CLDMA reset operations
+ * @mhccif_rc_base: host view of MHCCIF rc base addr
+ */
+struct t7xx_addr_base {
+	void __iomem		*pcie_mac_ireg_base;
+	void __iomem		*pcie_ext_reg_base;
+	u32			pcie_dev_reg_trsl_addr;
+	void __iomem		*infracfg_ao_base;
+	void __iomem		*mhccif_rc_base;
 };
 
-enum mtk_pcie_event_t {
-	PCIE_EVENT_L3ENTER,
-	PCIE_EVENT_L3EXIT,
+typedef irqreturn_t (*t7xx_intr_callback)(int irq, void *param);
+
+/* struct t7xx_pci_dev - MTK device context structure
+ * @intr_handler: array of handler function for request_threaded_irq
+ * @intr_thread: array of thread_fn for request_threaded_irq
+ * @callback_param: array of cookie passed back to interrupt functions
+ * @pdev: PCI device
+ * @base_addr: memory base addresses of HW components
+ * @md: modem interface
+ * @ccmni_ctlb: context structure used to control the network data path
+ * @rgu_pci_irq_en: RGU callback ISR registered and active
+ * @md_pm_entities: list of pm entities
+ * @md_pm_entity_mtx: protects md_pm_entities list
+ * @pm_sr_ack: ack from the device when went to sleep or woke up
+ * @md_pm_state: state for resume/suspend
+ * @md_pm_lock: protects PCIe sleep lock
+ * @sleep_disable_count: PCIe L1.2 lock counter
+ * @sleep_lock_acquire: indicates that sleep has been disabled
+ * @dl: devlink struct
+ */
+struct t7xx_pci_dev {
+	t7xx_intr_callback	intr_handler[EXT_INT_NUM];
+	t7xx_intr_callback	intr_thread[EXT_INT_NUM];
+	void			*callback_param[EXT_INT_NUM];
+	struct pci_dev		*pdev;
+	struct t7xx_addr_base	base_addr;
+	struct t7xx_modem	*md;
+	struct t7xx_ccmni_ctrl	*ccmni_ctlb;
+	bool			rgu_pci_irq_en;
+	bool			hp_enable;
+
+	/* Low Power Items */
+	struct list_head	md_pm_entities;
+	struct mutex		md_pm_entity_mtx;	/* Protects MD PM entities list */
+	struct completion	pm_sr_ack;
+	atomic_t		md_pm_state;
+	spinlock_t		md_pm_lock;		/* Protects PCI resource lock */
+	unsigned int		sleep_disable_count;
+	struct completion	sleep_lock_acquire;
+	struct t7xx_devlink	*dl;
 };
 
-#define PM_RESUME_REG_STATE_L3		0
-#define PM_RESUME_REG_STATE_L1		1
-#define PM_RESUME_REG_STATE_INIT	2
-#define PM_RESUME_REG_STATE_EXP		3
-#define PM_RESUME_REG_STATE_L2		4
-#define PM_RESUME_REG_STATE_L2_EXP	5
-
-#define PM_ENTITY_KEY_CTRL		1U	/* Control Path */
-#define PM_ENTITY_KEY_CTRL2		2U	/* Control Path */
-#define PM_ENTITY_KEY_DATA		3U	/* Data Path */
-#define PM_ENTITY_KEY_RESERVE0		4U	/* Reserved */
-#define PM_ENTITY_KEY_RESERVE1		5U	/* Reserved */
-
-#define PM_RESUME_HEADER		0x52450000
-#define PM_SUSPEND_HEADER		0x53550000
-
-#define MSIX_MSK_SET_ALL		0xFF000000
-
-typedef int (*mtk_pci_intr_callback)(void *param);
+enum t7xx_pm_id {
+	PM_ENTITY_ID_CTRL1,
+	PM_ENTITY_ID_CTRL2,
+	PM_ENTITY_ID_DATA,
+	PM_ENTITY_ID_INVALID
+};
 
 /* struct md_pm_entity - device power management entity
  * @entity: list of PM Entities
@@ -53,64 +96,28 @@ typedef int (*mtk_pci_intr_callback)(void *param);
  * @suspend_late: callback invoked after getting D3 ACK from device
  * @resume_early: callback invoked before sending the resume request to device
  * @resume: callback invoked after getting resume ACK from device
- * @key: unique PM entity identifier
+ * @id: unique PM entity identifier
  * @entity_param: parameter passed to the registered callbacks
+ *
+ *  This structure is used to indicate PM operations required by internal
+ *  HW modules such as CLDMA and DPMA.
  */
 struct md_pm_entity {
-	struct list_head entity;
-	int (*suspend)(struct mtk_pci_dev *mtk_dev, void *entity_param);
-	int (*suspend_late)(struct mtk_pci_dev *mtk_dev, void *entity_param);
-	int (*resume_early)(struct mtk_pci_dev *mtk_dev, void *entity_param);
-	int (*resume)(struct mtk_pci_dev *mtk_dev, void *entity_param);
-	unsigned int		key;
+	struct list_head	entity;
+	int (*suspend)(struct t7xx_pci_dev *t7xx_dev, void *entity_param);
+	void (*suspend_late)(struct t7xx_pci_dev *t7xx_dev, void *entity_param);
+	void (*resume_early)(struct t7xx_pci_dev *t7xx_dev, void *entity_param);
+	int (*resume)(struct t7xx_pci_dev *t7xx_dev, void *entity_param);
+	enum t7xx_pm_id		id;
 	void			*entity_param;
 };
 
-struct mtk_pci_dev {
-	unsigned long		state[1];
-	int			irq_count;
-	struct mtk_pci_isr_res	*msix_res;
-	mtk_pci_intr_callback	intr_callback[TOTAL_EXT_INT];
-	void			*callback_param[TOTAL_EXT_INT];
-	u32			mhccif_bitmask;
-	struct pci_dev		*pdev;
-	struct work_struct	service_task;
-	struct mtk_addr_base	base_addr;
-	struct workqueue_struct	*pcie_isr_wq;
-	struct ccci_modem	*md;
-
-	/* Low Power Items */
-	struct list_head	md_pm_entities;
-	spinlock_t		md_pm_lock;		/* protects PCI resource lock */
-	struct mutex		md_pm_entity_mtx;	/* protects md_pm_entities list */
-	atomic_t		l_res_lock_count;	/* PCIe L1.2 lock counter */
-	struct completion	l_res_acquire;
-	struct completion	pm_suspend_ack;
-	struct completion	pm_resume_ack;
-	struct completion	pm_suspend_ack_sap;
-	struct completion	pm_resume_ack_sap;
-	atomic_t		md_pm_init_done;
-	atomic_t		md_pm_resumed;
-	struct delayed_work	l_res_unlock_work;
-	atomic_t		pm_counter;
-
-	struct ccmni_ctl_block	*ccmni_ctlb;
-	u32			pm_enabled:1;
-	atomic_t		rgu_pci_irq_en;
-};
-
-void mtk_pci_l_resource_lock(struct mtk_pci_dev *mtk_dev);
-void mtk_pci_l_resource_unlock(struct mtk_pci_dev *mtk_dev);
-void mtk_pci_l_resource_wait_complete(struct mtk_pci_dev *mtk_dev);
-/* Non-blocking function for interrupt context to check the wait status
- * return value:
- * @true, wait is completed
- * @false, wait is in progress
- */
-bool mtk_pci_l_resource_try_wait_complete(struct mtk_pci_dev *mtk_dev);
-int mtk_pci_pm_entity_register(struct mtk_pci_dev *mtk_dev, struct md_pm_entity *pm_entity);
-int mtk_pci_pm_entity_unregister(struct mtk_pci_dev *mtk_dev, struct md_pm_entity *pm_entity);
-void mtk_pci_pm_init_late(struct mtk_pci_dev *mtk_dev);
-void mtk_pci_pm_exp_detected(struct mtk_pci_dev *mtk_dev);
+void t7xx_pci_disable_sleep(struct t7xx_pci_dev *t7xx_dev);
+void t7xx_pci_enable_sleep(struct t7xx_pci_dev *t7xx_dev);
+int t7xx_pci_sleep_disable_complete(struct t7xx_pci_dev *t7xx_dev);
+int t7xx_pci_pm_entity_register(struct t7xx_pci_dev *t7xx_dev, struct md_pm_entity *pm_entity);
+int t7xx_pci_pm_entity_unregister(struct t7xx_pci_dev *t7xx_dev, struct md_pm_entity *pm_entity);
+void t7xx_pci_pm_init_late(struct t7xx_pci_dev *t7xx_dev);
+void t7xx_pci_pm_exp_detected(struct t7xx_pci_dev *t7xx_dev);
 
 #endif /* __T7XX_PCI_H__ */

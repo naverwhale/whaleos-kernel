@@ -33,7 +33,7 @@ struct mmu_interval_notifier;
  *
  * @MMU_NOTIFY_SOFT_DIRTY: soft dirty accounting (still same page and same
  * access flags). User should soft dirty the page in the end callback to make
- * sure that anyone relying on soft dirtyness catch pages that might be written
+ * sure that anyone relying on soft dirtiness catch pages that might be written
  * through non CPU mappings.
  *
  * @MMU_NOTIFY_RELEASE: used during mmu_interval_notifier invalidate to signal
@@ -41,7 +41,12 @@ struct mmu_interval_notifier;
  *
  * @MMU_NOTIFY_MIGRATE: used during migrate_vma_collect() invalidate to signal
  * a device driver to possibly ignore the invalidation if the
- * migrate_pgmap_owner field matches the driver's device private pgmap owner.
+ * owner field matches the driver's device private pgmap owner.
+ *
+ * @MMU_NOTIFY_EXCLUSIVE: to signal a device driver that the device will no
+ * longer have exclusive access to the page. When sent during creation of an
+ * exclusive range the owner will be initialised to the value provided by the
+ * caller of make_device_exclusive_range(), otherwise the owner will be NULL.
  */
 enum mmu_notifier_event {
 	MMU_NOTIFY_UNMAP = 0,
@@ -51,14 +56,7 @@ enum mmu_notifier_event {
 	MMU_NOTIFY_SOFT_DIRTY,
 	MMU_NOTIFY_RELEASE,
 	MMU_NOTIFY_MIGRATE,
-};
-
-struct mmu_notifier_walk {
-	bool (*start_batch)(struct mm_struct *mm, void *priv);
-	bool (*end_batch)(void *priv, bool last);
-	struct page *(*get_page)(void *priv, unsigned long pfn, bool young);
-	void (*update_page)(void *priv, struct page *page);
-	void *private;
+	MMU_NOTIFY_EXCLUSIVE,
 };
 
 #define MMU_NOTIFIER_RANGE_BLOCKABLE (1 << 0)
@@ -114,9 +112,6 @@ struct mmu_notifier_ops {
 			   unsigned long start,
 			   unsigned long end);
 
-	void (*clear_young_walk)(struct mmu_notifier *mn,
-				 struct mmu_notifier_walk *walk);
-
 	/*
 	 * test_young is called to check the young/accessed bitflag in
 	 * the secondary pte. This is used to know if the page is
@@ -126,6 +121,11 @@ struct mmu_notifier_ops {
 	int (*test_young)(struct mmu_notifier *subscription,
 			  struct mm_struct *mm,
 			  unsigned long address);
+
+	/* see the comments on mmu_notifier_test_clear_young() */
+	bool (*test_clear_young)(struct mmu_notifier *mn, struct mm_struct *mm,
+				 unsigned long start, unsigned long end,
+				 unsigned long *bitmap);
 
 	/*
 	 * change_pte is called in cases that pte mapping to page is changed:
@@ -172,7 +172,7 @@ struct mmu_notifier_ops {
 	 * decrease the refcount. If the refcount is decreased on
 	 * invalidate_range_start() then the VM can free pages as page
 	 * table entries are removed.  If the refcount is only
-	 * droppped on invalidate_range_end() then the driver itself
+	 * dropped on invalidate_range_end() then the driver itself
 	 * will drop the last refcount but it must take care to flush
 	 * any secondary tlb before doing the final free on the
 	 * page. Pages will no longer be referenced by the linux
@@ -201,7 +201,7 @@ struct mmu_notifier_ops {
 	 * If invalidate_range() is used to manage a non-CPU TLB with
 	 * shared page-tables, it not necessary to implement the
 	 * invalidate_range_start()/end() notifiers, as
-	 * invalidate_range() alread catches the points in time when an
+	 * invalidate_range() already catches the points in time when an
 	 * external TLB range needs to be flushed. For more in depth
 	 * discussion on this see Documentation/vm/mmu_notifier.rst
 	 *
@@ -280,7 +280,7 @@ struct mmu_notifier_range {
 	unsigned long end;
 	unsigned flags;
 	enum mmu_notifier_event event;
-	void *migrate_pgmap_owner;
+	void *owner;
 };
 
 static inline int mm_has_notifiers(struct mm_struct *mm)
@@ -374,7 +374,7 @@ mmu_interval_read_retry(struct mmu_interval_notifier *interval_sub,
  * mmu_interval_read_retry() will return true.
  *
  * False is not reliable and only suggests a collision may not have
- * occured. It can be called many times and does not have to hold the user
+ * occurred. It can be called many times and does not have to hold the user
  * provided lock.
  *
  * This call can be used as part of loops and other expensive operations to
@@ -396,10 +396,11 @@ extern int __mmu_notifier_clear_flush_young(struct mm_struct *mm,
 extern int __mmu_notifier_clear_young(struct mm_struct *mm,
 				      unsigned long start,
 				      unsigned long end);
-extern void __mmu_notifier_clear_young_walk(struct mm_struct *mm,
-					    struct mmu_notifier_walk *walk);
 extern int __mmu_notifier_test_young(struct mm_struct *mm,
 				     unsigned long address);
+extern int __mmu_notifier_test_clear_young(struct mm_struct *mm,
+					   unsigned long start, unsigned long end,
+					   bool fallback, unsigned long *bitmap);
 extern void __mmu_notifier_change_pte(struct mm_struct *mm,
 				      unsigned long address, pte_t pte);
 extern int __mmu_notifier_invalidate_range_start(struct mmu_notifier_range *r);
@@ -440,18 +441,36 @@ static inline int mmu_notifier_clear_young(struct mm_struct *mm,
 	return 0;
 }
 
-static inline void mmu_notifier_clear_young_walk(struct mm_struct *mm,
-						 struct mmu_notifier_walk *walk)
-{
-	if (mm_has_notifiers(mm))
-		__mmu_notifier_clear_young_walk(mm, walk);
-}
-
 static inline int mmu_notifier_test_young(struct mm_struct *mm,
 					  unsigned long address)
 {
 	if (mm_has_notifiers(mm))
 		return __mmu_notifier_test_young(mm, address);
+	return 0;
+}
+
+/*
+ * This function always returns 0 if fallback is not allowed. If fallback
+ * happens, its return value is similar to that of mmu_notifier_clear_young().
+ *
+ * The bitmap has the following specifications:
+ * 1. The number of bits should be at least (end-start)/PAGE_SIZE.
+ * 2. The offset of each bit is relative to the end. E.g., the offset
+ *    corresponding to addr is (end-addr)/PAGE_SIZE-1. This is convenient for
+ *    batching while forward looping.
+ * 3. For each KVM PTE with the accessed bit set (young), this function flips
+ *    the corresponding bit in the bitmap. It only clears the accessed bit if
+ *    the old value is 1. A caller can test or test and clear the accessed bit
+ *    by setting the corresponding bit in the bitmap to 0 or 1, and the new
+ *    value will be 1 or 0 for a young KVM PTE.
+ */
+static inline int mmu_notifier_test_clear_young(struct mm_struct *mm,
+						unsigned long start, unsigned long end,
+						bool fallback, unsigned long *bitmap)
+{
+	if (mm_has_notifiers(mm))
+		return __mmu_notifier_test_clear_young(mm, start, end, fallback, bitmap);
+
 	return 0;
 }
 
@@ -541,14 +560,14 @@ static inline void mmu_notifier_range_init(struct mmu_notifier_range *range,
 	range->flags = flags;
 }
 
-static inline void mmu_notifier_range_init_migrate(
-			struct mmu_notifier_range *range, unsigned int flags,
+static inline void mmu_notifier_range_init_owner(
+			struct mmu_notifier_range *range,
+			enum mmu_notifier_event event, unsigned int flags,
 			struct vm_area_struct *vma, struct mm_struct *mm,
-			unsigned long start, unsigned long end, void *pgmap)
+			unsigned long start, unsigned long end, void *owner)
 {
-	mmu_notifier_range_init(range, MMU_NOTIFY_MIGRATE, flags, vma, mm,
-				start, end);
-	range->migrate_pgmap_owner = pgmap;
+	mmu_notifier_range_init(range, event, flags, vma, mm, start, end);
+	range->owner = owner;
 }
 
 #define ptep_clear_flush_young_notify(__vma, __address, __ptep)		\
@@ -675,8 +694,8 @@ static inline void _mmu_notifier_range_init(struct mmu_notifier_range *range,
 
 #define mmu_notifier_range_init(range,event,flags,vma,mm,start,end)  \
 	_mmu_notifier_range_init(range, start, end)
-#define mmu_notifier_range_init_migrate(range, flags, vma, mm, start, end, \
-					pgmap) \
+#define mmu_notifier_range_init_owner(range, event, flags, vma, mm, start, \
+					end, owner) \
 	_mmu_notifier_range_init(range, start, end)
 
 static inline bool
@@ -701,13 +720,15 @@ static inline int mmu_notifier_clear_flush_young(struct mm_struct *mm,
 	return 0;
 }
 
-static inline void mmu_notifier_clear_young_walk(struct mm_struct *mm,
-						 struct mmu_notifier_walk *walk)
-{
-}
-
 static inline int mmu_notifier_test_young(struct mm_struct *mm,
 					  unsigned long address)
+{
+	return 0;
+}
+
+static inline int mmu_notifier_test_clear_young(struct mm_struct *mm,
+						unsigned long start, unsigned long end,
+						bool fallback, unsigned long *bitmap)
 {
 	return 0;
 }

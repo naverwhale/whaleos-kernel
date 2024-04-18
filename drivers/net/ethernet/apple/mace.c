@@ -364,9 +364,9 @@ static void mace_reset(struct net_device *dev)
 	out_8(&mb->iac, 0);
 
     if (mp->port_aaui)
-    	out_8(&mb->plscc, PORTSEL_AUI + ENPLSIO);
+	out_8(&mb->plscc, PORTSEL_AUI + ENPLSIO);
     else
-    	out_8(&mb->plscc, PORTSEL_GPSI + ENPLSIO);
+	out_8(&mb->plscc, PORTSEL_GPSI + ENPLSIO);
 }
 
 static void __mace_set_address(struct net_device *dev, void *addr)
@@ -378,9 +378,9 @@ static void __mace_set_address(struct net_device *dev, void *addr)
 
     /* load up the hardware address */
     if (mp->chipid == BROKEN_ADDRCHG_REV)
-    	out_8(&mb->iac, PHYADDR);
+	out_8(&mb->iac, PHYADDR);
     else {
-    	out_8(&mb->iac, ADDRCHG | PHYADDR);
+	out_8(&mb->iac, ADDRCHG | PHYADDR);
 	while ((in_8(&mb->iac) & ADDRCHG) != 0)
 	    ;
     }
@@ -841,7 +841,7 @@ static void mace_tx_timeout(struct timer_list *t)
     if (mp->tx_bad_runt) {
 	mp->tx_bad_runt = 0;
     } else if (i != mp->tx_fill) {
-	dev_kfree_skb(mp->tx_bufs[i]);
+	dev_kfree_skb_irq(mp->tx_bufs[i]);
 	if (++i >= N_TX_RING)
 	    i = 0;
 	mp->tx_empty = i;

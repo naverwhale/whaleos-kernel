@@ -42,9 +42,6 @@ static const struct mfd_cell rt5033_devs[] = {
 		.name = "rt5033-charger",
 		.of_compatible = "richtek,rt5033-charger",
 	}, {
-		.name = "rt5033-battery",
-		.of_compatible = "richtek,rt5033-battery",
-	}, {
 		.name = "rt5033-led",
 		.of_compatible = "richtek,rt5033-led",
 	},
@@ -122,7 +119,7 @@ MODULE_DEVICE_TABLE(of, rt5033_dt_match);
 static struct i2c_driver rt5033_driver = {
 	.driver = {
 		.name = "rt5033",
-		.of_match_table = of_match_ptr(rt5033_dt_match),
+		.of_match_table = rt5033_dt_match,
 	},
 	.probe = rt5033_i2c_probe,
 	.id_table = rt5033_i2c_id,

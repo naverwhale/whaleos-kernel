@@ -23,7 +23,7 @@
 #include "internal.h"
 
 /**
- * struct psz_head - header of zone to flush to storage
+ * struct psz_buffer - header of zone to flush to storage
  *
  * @sig: signature to indicate header (PSZ_SIG xor PSZONE-type value)
  * @datalen: length of data in @data
@@ -761,7 +761,7 @@ static inline int notrace psz_kmsg_write_record(struct psz_context *cxt,
 		/* avoid destroying old data, allocate a new one */
 		len = zone->buffer_size + sizeof(*zone->buffer);
 		zone->oldbuf = zone->buffer;
-		zone->buffer = kzalloc(len, GFP_KERNEL);
+		zone->buffer = kzalloc(len, GFP_ATOMIC);
 		if (!zone->buffer) {
 			zone->buffer = zone->oldbuf;
 			return -ENOMEM;
@@ -1298,6 +1298,10 @@ int register_pstore_zone(struct pstore_zone_info *info)
 	if (info->total_size < 4096) {
 		pr_warn("total_size must be >= 4096\n");
 		return -EINVAL;
+	}
+	if (info->total_size > SZ_128M) {
+		pr_warn("capping size to 128MiB\n");
+		info->total_size = SZ_128M;
 	}
 
 	if (!info->kmsg_size && !info->pmsg_size && !info->console_size &&

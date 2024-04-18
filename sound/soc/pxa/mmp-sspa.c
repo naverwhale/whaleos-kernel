@@ -239,11 +239,15 @@ static int mmp_sspa_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	sspa_ctrl &= ~SSPA_CTL_XPH;
 	if (dev->of_node || params_channels(params) == 2)
 		sspa_ctrl |= SSPA_CTL_XPH;
 
 	sspa_ctrl &= ~SSPA_CTL_XWDLEN1_MASK;
 	sspa_ctrl |= SSPA_CTL_XWDLEN1(bitval);
+
+	sspa_ctrl &= ~SSPA_CTL_XWDLEN2_MASK;
+	sspa_ctrl |= SSPA_CTL_XWDLEN2(bitval);
 
 	sspa_ctrl &= ~SSPA_CTL_XSSZ1_MASK;
 	sspa_ctrl |= SSPA_CTL_XSSZ1(bitval);
@@ -326,7 +330,6 @@ static int mmp_sspa_probe(struct snd_soc_dai *dai)
 				&sspa->playback_dma_data,
 				&sspa->capture_dma_data);
 
-	snd_soc_dai_set_drvdata(dai, sspa);
 	return 0;
 }
 
@@ -453,10 +456,11 @@ static int mmp_sspa_close(struct snd_soc_component *component,
 }
 
 static const struct snd_soc_component_driver mmp_sspa_component = {
-	.name		= "mmp-sspa",
-	.mmap		= mmp_pcm_mmap,
-	.open		= mmp_sspa_open,
-	.close		= mmp_sspa_close,
+	.name			= "mmp-sspa",
+	.mmap			= mmp_pcm_mmap,
+	.open			= mmp_sspa_open,
+	.close			= mmp_sspa_close,
+	.legacy_dai_naming	= 1,
 };
 
 static int asoc_mmp_sspa_probe(struct platform_device *pdev)

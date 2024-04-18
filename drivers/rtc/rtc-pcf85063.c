@@ -21,10 +21,10 @@
 /*
  * Information for this driver was pulled from the following datasheets.
  *
- *  https://www.nxp.com/documents/data_sheet/PCF85063A.pdf
- *  https://www.nxp.com/documents/data_sheet/PCF85063TP.pdf
+ *  https://www.nxp.com/docs/en/data-sheet/PCF85063A.pdf
+ *  https://www.nxp.com/docs/en/data-sheet/PCF85063TP.pdf
  *
- *  PCF85063A -- Rev. 6 — 18 November 2015
+ *  PCF85063A -- Rev. 7 — 30 March 2018
  *  PCF85063TP -- Rev. 4 — 6 May 2015
  *
  *  https://www.microcrystal.com/fileadmin/Media/Products/RTC/App.Manual/RV-8263-C7_App-Manual.pdf
@@ -167,10 +167,10 @@ static int pcf85063_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	if (ret)
 		return ret;
 
-	alrm->time.tm_sec = bcd2bin(buf[0]);
-	alrm->time.tm_min = bcd2bin(buf[1]);
-	alrm->time.tm_hour = bcd2bin(buf[2]);
-	alrm->time.tm_mday = bcd2bin(buf[3]);
+	alrm->time.tm_sec = bcd2bin(buf[0] & 0x7f);
+	alrm->time.tm_min = bcd2bin(buf[1] & 0x7f);
+	alrm->time.tm_hour = bcd2bin(buf[2] & 0x3f);
+	alrm->time.tm_mday = bcd2bin(buf[3] & 0x3f);
 
 	ret = regmap_read(pcf85063->regmap, PCF85063_REG_CTRL2, &val);
 	if (ret)
@@ -311,14 +311,6 @@ static const struct rtc_class_ops pcf85063_rtc_ops = {
 	.set_time	= pcf85063_rtc_set_time,
 	.read_offset	= pcf85063_read_offset,
 	.set_offset	= pcf85063_set_offset,
-	.ioctl		= pcf85063_ioctl,
-};
-
-static const struct rtc_class_ops pcf85063_rtc_ops_alarm = {
-	.read_time	= pcf85063_rtc_read_time,
-	.set_time	= pcf85063_rtc_set_time,
-	.read_offset	= pcf85063_read_offset,
-	.set_offset	= pcf85063_set_offset,
 	.read_alarm	= pcf85063_rtc_read_alarm,
 	.set_alarm	= pcf85063_rtc_set_alarm,
 	.alarm_irq_enable = pcf85063_rtc_alarm_irq_enable,
@@ -430,7 +422,7 @@ static int pcf85063_clkout_control(struct clk_hw *hw, bool enable)
 	unsigned int buf;
 	int ret;
 
-	ret = regmap_read(pcf85063->regmap, PCF85063_REG_OFFSET, &buf);
+	ret = regmap_read(pcf85063->regmap, PCF85063_REG_CTRL2, &buf);
 	if (ret < 0)
 		return ret;
 	buf &= PCF85063_REG_CLKO_F_MASK;
@@ -508,31 +500,12 @@ static struct clk *pcf85063_clkout_register_clk(struct pcf85063 *pcf85063)
 }
 #endif
 
-static const struct pcf85063_config pcf85063a_config = {
-	.regmap = {
-		.reg_bits = 8,
-		.val_bits = 8,
-		.max_register = 0x11,
-	},
-	.has_alarms = 1,
-};
-
 static const struct pcf85063_config pcf85063tp_config = {
 	.regmap = {
 		.reg_bits = 8,
 		.val_bits = 8,
 		.max_register = 0x0a,
 	},
-};
-
-static const struct pcf85063_config rv8263_config = {
-	.regmap = {
-		.reg_bits = 8,
-		.val_bits = 8,
-		.max_register = 0x11,
-	},
-	.has_alarms = 1,
-	.force_cap_7000 = 1,
 };
 
 static int pcf85063_probe(struct i2c_client *client)
@@ -586,6 +559,7 @@ static int pcf85063_probe(struct i2c_client *client)
 	pcf85063->rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
 	pcf85063->rtc->range_max = RTC_TIMESTAMP_END_2099;
 	pcf85063->rtc->uie_unsupported = 1;
+	clear_bit(RTC_FEATURE_ALARM, pcf85063->rtc->features);
 
 	if (config->has_alarms && client->irq > 0) {
 		err = devm_request_threaded_irq(&client->dev, client->irq,
@@ -596,7 +570,7 @@ static int pcf85063_probe(struct i2c_client *client)
 			dev_warn(&pcf85063->rtc->dev,
 				 "unable to request IRQ, alarms disabled\n");
 		} else {
-			pcf85063->rtc->ops = &pcf85063_rtc_ops_alarm;
+			set_bit(RTC_FEATURE_ALARM, pcf85063->rtc->features);
 			device_init_wakeup(&client->dev, true);
 			err = dev_pm_set_wake_irq(&client->dev, client->irq);
 			if (err)
@@ -606,17 +580,36 @@ static int pcf85063_probe(struct i2c_client *client)
 	}
 
 	nvmem_cfg.priv = pcf85063->regmap;
-	rtc_nvmem_register(pcf85063->rtc, &nvmem_cfg);
+	devm_rtc_nvmem_register(pcf85063->rtc, &nvmem_cfg);
 
 #ifdef CONFIG_COMMON_CLK
 	/* register clk in common clk framework */
 	pcf85063_clkout_register_clk(pcf85063);
 #endif
 
-	return rtc_register_device(pcf85063->rtc);
+	return devm_rtc_register_device(pcf85063->rtc);
 }
 
 #ifdef CONFIG_OF
+static const struct pcf85063_config pcf85063a_config = {
+	.regmap = {
+		.reg_bits = 8,
+		.val_bits = 8,
+		.max_register = 0x11,
+	},
+	.has_alarms = 1,
+};
+
+static const struct pcf85063_config rv8263_config = {
+	.regmap = {
+		.reg_bits = 8,
+		.val_bits = 8,
+		.max_register = 0x11,
+	},
+	.has_alarms = 1,
+	.force_cap_7000 = 1,
+};
+
 static const struct of_device_id pcf85063_of_match[] = {
 	{ .compatible = "nxp,pcf85063", .data = &pcf85063tp_config },
 	{ .compatible = "nxp,pcf85063tp", .data = &pcf85063tp_config },

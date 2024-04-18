@@ -37,7 +37,7 @@
 #include <linux/firmware.h>
 #include <linux/bitops.h>
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <linux/uaccess.h>
 
@@ -118,7 +118,7 @@ MODULE_DEVICE_TABLE(pci, icom_pci_table);
 static LIST_HEAD(icom_adapter_head);
 
 /* spinlock for adapter initialization and changing adapter operations */
-static spinlock_t icom_lock;
+static DEFINE_SPINLOCK(icom_lock);
 
 #ifdef ICOM_TRACE
 static inline void trace(struct icom_port *icom_port, char *trace_pt,
@@ -829,9 +829,7 @@ ignore_char:
 	}
 	icom_port->next_rcv = rcv_buff;
 
-	spin_unlock(&icom_port->uart_port.lock);
 	tty_flip_buffer_push(port);
-	spin_lock(&icom_port->uart_port.lock);
 }
 
 static void process_interrupt(u16 port_int_reg,
@@ -1503,7 +1501,7 @@ static int icom_probe(struct pci_dev *dev,
 	retval = pci_read_config_dword(dev, PCI_COMMAND, &command_reg);
 	if (retval) {
 		dev_err(&dev->dev, "PCI Config read FAILED\n");
-		return retval;
+		goto probe_exit0;
 	}
 
 	pci_write_config_dword(dev, PCI_COMMAND,
@@ -1615,8 +1613,6 @@ static struct pci_driver icom_pci_driver = {
 static int __init icom_init(void)
 {
 	int ret;
-
-	spin_lock_init(&icom_lock);
 
 	ret = uart_register_driver(&icom_uart_driver);
 	if (ret)

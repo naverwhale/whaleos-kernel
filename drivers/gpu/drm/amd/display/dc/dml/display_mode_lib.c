@@ -33,11 +33,13 @@
 #include "dcn21/display_rq_dlg_calc_21.h"
 #include "dcn30/display_mode_vba_30.h"
 #include "dcn30/display_rq_dlg_calc_30.h"
-#include "dml_logger.h"
-#ifdef CONFIG_DRM_AMD_DC_DCN3_1
 #include "dcn31/display_mode_vba_31.h"
 #include "dcn31/display_rq_dlg_calc_31.h"
-#endif
+#include "dcn314/display_mode_vba_314.h"
+#include "dcn314/display_rq_dlg_calc_314.h"
+#include "dcn32/display_mode_vba_32.h"
+#include "dcn32/display_rq_dlg_calc_32.h"
+#include "dml_logger.h"
 
 const struct dml_funcs dml20_funcs = {
 	.validate = dml20_ModeSupportAndSystemConfigurationFull,
@@ -66,14 +68,27 @@ const struct dml_funcs dml30_funcs = {
 	.rq_dlg_get_dlg_reg = dml30_rq_dlg_get_dlg_reg,
 	.rq_dlg_get_rq_reg = dml30_rq_dlg_get_rq_reg
 };
-#if defined(CONFIG_DRM_AMD_DC_DCN3_1)
+
 const struct dml_funcs dml31_funcs = {
 	.validate = dml31_ModeSupportAndSystemConfigurationFull,
 	.recalculate = dml31_recalculate,
 	.rq_dlg_get_dlg_reg = dml31_rq_dlg_get_dlg_reg,
 	.rq_dlg_get_rq_reg = dml31_rq_dlg_get_rq_reg
 };
-#endif
+
+const struct dml_funcs dml314_funcs = {
+	.validate = dml314_ModeSupportAndSystemConfigurationFull,
+	.recalculate = dml314_recalculate,
+	.rq_dlg_get_dlg_reg = dml314_rq_dlg_get_dlg_reg,
+	.rq_dlg_get_rq_reg = dml314_rq_dlg_get_rq_reg
+};
+
+const struct dml_funcs dml32_funcs = {
+	.validate = dml32_ModeSupportAndSystemConfigurationFull,
+    .recalculate = dml32_recalculate,
+	.rq_dlg_get_dlg_reg_v2 = dml32_rq_dlg_get_dlg_reg,
+	.rq_dlg_get_rq_reg_v2 = dml32_rq_dlg_get_rq_reg
+};
 
 void dml_init_instance(struct display_mode_lib *lib,
 		const struct _vcs_dpi_soc_bounding_box_st *soc_bb,
@@ -85,6 +100,7 @@ void dml_init_instance(struct display_mode_lib *lib,
 	lib->project = project;
 	switch (project) {
 	case DML_PROJECT_NAVI10:
+	case DML_PROJECT_DCN201:
 		lib->funcs = dml20_funcs;
 		break;
 	case DML_PROJECT_NAVI10v2:
@@ -96,13 +112,18 @@ void dml_init_instance(struct display_mode_lib *lib,
 	case DML_PROJECT_DCN30:
 		lib->funcs = dml30_funcs;
 		break;
-#if defined(CONFIG_DRM_AMD_DC_DCN3_1)
 	case DML_PROJECT_DCN31:
 	case DML_PROJECT_DCN31_FPGA:
+	case DML_PROJECT_DCN315:
 		lib->funcs = dml31_funcs;
 		break;
+	case DML_PROJECT_DCN314:
+		lib->funcs = dml314_funcs;
+		break;
+	case DML_PROJECT_DCN32:
+		lib->funcs = dml32_funcs;
+		break;
 
-#endif
 	default:
 		break;
 	}

@@ -7,6 +7,8 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
 #include <linux/platform_device.h>
+#include <linux/module.h>
+#include <linux/mod_devicetable.h>
 
 #include "../common/hid-sensors/hid-sensor-trigger.h"
 
@@ -26,8 +28,9 @@ static const u32 hinge_addresses[CHANNEL_SCAN_INDEX_MAX] = {
 };
 
 static const char *const hinge_labels[CHANNEL_SCAN_INDEX_MAX] = { "hinge",
-								  "screen",
-								  "keyboard" };
+	"screen",
+	"keyboard"
+};
 
 struct hinge_state {
 	struct iio_dev *indio_dev;
@@ -40,6 +43,9 @@ struct hinge_state {
 		u64 timestamp __aligned(8);
 	} scan;
 
+	int tablet;
+	struct input_dev *idev;
+
 	int scale_pre_decml;
 	int scale_post_decml;
 	int scale_precision;
@@ -47,48 +53,52 @@ struct hinge_state {
 	u64 timestamp;
 };
 
+static const u32 hinge_sensitivity_addresses[] = {
+	HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(1),
+};
+
 /* Channel definitions */
 static const struct iio_chan_spec hinge_channels[] = {
 	{
-		.type = IIO_ANGL,
-		.indexed = 1,
-		.channel = 0,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type =
-			BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_HINGE_ANGLE,
-		.scan_type = {
-			.sign = 's',
-			.storagebits = 32,
-		},
-	}, {
-		.type = IIO_ANGL,
-		.indexed = 1,
-		.channel = 1,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type =
-			BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_SCREEN_ANGLE,
-		.scan_type = {
-			.sign = 's',
-			.storagebits = 32,
-		},
-	}, {
-		.type = IIO_ANGL,
-		.indexed = 1,
-		.channel = 2,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type =
-			BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_KEYBOARD_ANGLE,
-		.scan_type = {
-			.sign = 's',
-			.storagebits = 32,
-		},
-	},
+	 .type = IIO_ANGL,
+	 .indexed = 1,
+	 .channel = 0,
+	 .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+	 .info_mask_shared_by_type =
+	 BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
+	 BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
+	 .scan_index = CHANNEL_SCAN_INDEX_HINGE_ANGLE,
+	 .scan_type = {
+		       .sign = 's',
+		       .storagebits = 32,
+		       },
+	  }, {
+	      .type = IIO_ANGL,
+	      .indexed = 1,
+	      .channel = 1,
+	      .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+	      .info_mask_shared_by_type =
+	      BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
+	      BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
+	      .scan_index = CHANNEL_SCAN_INDEX_SCREEN_ANGLE,
+	      .scan_type = {
+			    .sign = 's',
+			    .storagebits = 32,
+			    },
+	       }, {
+		   .type = IIO_ANGL,
+		   .indexed = 1,
+		   .channel = 2,
+		   .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		   .info_mask_shared_by_type =
+		   BIT(IIO_CHAN_INFO_OFFSET) | BIT(IIO_CHAN_INFO_SCALE) |
+		   BIT(IIO_CHAN_INFO_SAMP_FREQ) | BIT(IIO_CHAN_INFO_HYSTERESIS),
+		   .scan_index = CHANNEL_SCAN_INDEX_KEYBOARD_ANGLE,
+		   .scan_type = {
+				 .sign = 's',
+				 .storagebits = 32,
+				 },
+		    },
 	IIO_CHAN_SOFT_TIMESTAMP(CHANNEL_SCAN_INDEX_TIMESTAMP)
 };
 
@@ -119,11 +129,16 @@ static int hinge_read_raw(struct iio_dev *indio_dev,
 			hid_sensor_power_state(&st->common_attributes, false);
 			return -EINVAL;
 		}
-		*val = sensor_hub_input_attr_get_raw_value(st->common_attributes.hsdev,
-							   hsdev->usage,
-							   hinge_addresses[chan->scan_index],
-							   report_id,
-							   SENSOR_HUB_SYNC, min < 0);
+		*val =
+		    sensor_hub_input_attr_get_raw_value(st->
+							common_attributes.hsdev,
+							hsdev->usage,
+							hinge_addresses
+							[chan->scan_index],
+							report_id,
+							SENSOR_HUB_SYNC,
+							min < 0);
+
 		hid_sensor_power_state(&st->common_attributes, false);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
@@ -207,17 +222,31 @@ static int hinge_capture_sample(struct hid_sensor_hub_device *hsdev,
 	struct iio_dev *indio_dev = platform_get_drvdata(priv);
 	struct hinge_state *st = iio_priv(indio_dev);
 	int offset;
+	int mode_check = 0;
 
 	switch (usage_id) {
 	case HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(1):
+		mode_check = 1;
 	case HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(2):
 	case HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(3):
 		offset = usage_id - HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(1);
-		st->scan.hinge_val[offset] = *(u32 *)raw_data;
+		st->scan.hinge_val[offset] = *(u32 *) raw_data;
+		// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform/ec/common/motion_lid.c
+		if (mode_check
+		    && ((!st->tablet && *(u16 *) raw_data > 200)
+			|| (st->tablet && *(u16 *) raw_data < 160))) {
+			dev_dbg(indio_dev->dev.parent, "angle %d, send event\n",
+				*(u16 *) raw_data / 10);
+			st->tablet = !st->tablet;
+			input_report_switch(st->idev, SW_TABLET_MODE,
+					    st->tablet);
+			input_sync(st->idev);
+		}
 		return 0;
 	case HID_USAGE_SENSOR_TIME_TIMESTAMP:
-		st->timestamp = hid_sensor_convert_timestamp(&st->common_attributes,
-							     *(int64_t *)raw_data);
+		st->timestamp =
+		    hid_sensor_convert_timestamp(&st->common_attributes,
+						 *(int64_t *) raw_data);
 		return 0;
 	default:
 		return -EINVAL;
@@ -246,20 +275,10 @@ static int hinge_parse_report(struct platform_device *pdev,
 	}
 
 	st->scale_precision = hid_sensor_format_scale(HID_USAGE_SENSOR_HINGE,
-			&st->hinge[CHANNEL_SCAN_INDEX_HINGE_ANGLE],
-			&st->scale_pre_decml, &st->scale_post_decml);
-
-	/* Set Sensitivity field ids, when there is no individual modifier */
-	if (st->common_attributes.sensitivity.index < 0) {
-		sensor_hub_input_get_attribute_info(hsdev,
-				HID_FEATURE_REPORT, usage_id,
-				HID_USAGE_SENSOR_DATA_MOD_CHANGE_SENSITIVITY_ABS |
-					HID_USAGE_SENSOR_DATA_FIELD_CUSTOM_VALUE(1),
-				&st->common_attributes.sensitivity);
-		dev_dbg(&pdev->dev, "Sensitivity index:report %d:%d\n",
-			st->common_attributes.sensitivity.index,
-			st->common_attributes.sensitivity.report_id);
-	}
+						      &st->hinge
+						      [CHANNEL_SCAN_INDEX_HINGE_ANGLE],
+						      &st->scale_pre_decml,
+						      &st->scale_post_decml);
 
 	return ret;
 }
@@ -272,6 +291,7 @@ static int hid_hinge_probe(struct platform_device *pdev)
 	struct hid_sensor_hub_device *hsdev = pdev->dev.platform_data;
 	int ret;
 	int i;
+	struct input_dev *idev;
 
 	indio_dev = devm_iio_device_alloc(&pdev->dev, sizeof(*st));
 	if (!indio_dev)
@@ -287,7 +307,10 @@ static int hid_hinge_probe(struct platform_device *pdev)
 		st->labels[i] = hinge_labels[i];
 
 	ret = hid_sensor_parse_common_attributes(hsdev, hsdev->usage,
-						 &st->common_attributes);
+						 &st->common_attributes,
+						 hinge_sensitivity_addresses,
+						 ARRAY_SIZE
+						 (hinge_sensitivity_addresses));
 	if (ret) {
 		dev_err(&pdev->dev, "failed to setup common attributes\n");
 		return ret;
@@ -307,9 +330,8 @@ static int hid_hinge_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	indio_dev->dev.parent = &pdev->dev;
 	indio_dev->info = &hinge_info;
-	indio_dev->name = "hinge";
+	indio_dev->name = "angl";
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	atomic_set(&st->common_attributes.data_ready, 0);
@@ -334,6 +356,22 @@ static int hid_hinge_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "device register failed\n");
 		goto error_remove_callback;
 	}
+
+	idev = input_allocate_device();
+	if (!idev)
+		return -ENOMEM;
+
+	idev->name = "tablet_mode";
+	idev->id.bustype = BUS_HOST;
+	input_set_capability(idev, EV_SW, SW_TABLET_MODE);
+
+	ret = input_register_device(idev);
+	if (ret) {
+		input_free_device(idev);
+		return ret;
+	}
+
+	st->idev = idev;
 
 	return ret;
 
@@ -360,24 +398,27 @@ static int hid_hinge_remove(struct platform_device *pdev)
 
 static const struct platform_device_id hid_hinge_ids[] = {
 	{
-		/* Format: HID-SENSOR-INT-usage_id_in_hex_lowercase */
-		.name = "HID-SENSOR-INT-020b",
-	},
-	{ /* sentinel */ }
+	 /* Format: HID-SENSOR-INT-usage_id_in_hex_lowercase */
+	 .name = "HID-SENSOR-INT-020b",
+	  },
+	{ /* sentinel */  }
 };
+
 MODULE_DEVICE_TABLE(platform, hid_hinge_ids);
 
 static struct platform_driver hid_hinge_platform_driver = {
 	.id_table = hid_hinge_ids,
 	.driver = {
-		.name	= KBUILD_MODNAME,
-		.pm	= &hid_sensor_pm_ops,
-	},
-	.probe		= hid_hinge_probe,
-	.remove		= hid_hinge_remove,
+		   .name = KBUILD_MODNAME,
+		   .pm = &hid_sensor_pm_ops,
+		    },
+	.probe = hid_hinge_probe,
+	.remove = hid_hinge_remove,
 };
+
 module_platform_driver(hid_hinge_platform_driver);
 
 MODULE_DESCRIPTION("HID Sensor INTEL Hinge");
 MODULE_AUTHOR("Ye Xiang <xiang.ye@intel.com>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(IIO_HID);

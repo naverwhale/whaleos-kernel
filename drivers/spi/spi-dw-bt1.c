@@ -217,7 +217,7 @@ static int dw_spi_bt1_sys_init(struct platform_device *pdev,
 	if (mem) {
 		dwsbt1->map = devm_ioremap_resource(&pdev->dev, mem);
 		if (!IS_ERR(dwsbt1->map)) {
-			dwsbt1->map_len = (mem->end - mem->start + 1);
+			dwsbt1->map_len = resource_size(mem);
 			dws->mem_ops.dirmap_create = dw_spi_bt1_dirmap_create;
 			dws->mem_ops.dirmap_read = dw_spi_bt1_dirmap_read;
 		} else {
@@ -293,8 +293,10 @@ static int dw_spi_bt1_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	ret = dw_spi_add_host(&pdev->dev, dws);
-	if (ret)
+	if (ret) {
+		pm_runtime_disable(&pdev->dev);
 		goto err_disable_clk;
+	}
 
 	platform_set_drvdata(pdev, dwsbt1);
 

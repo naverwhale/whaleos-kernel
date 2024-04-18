@@ -157,6 +157,7 @@ nouveau_conn_atomic_set_property(struct drm_connector *connector,
 			default:
 				break;
 			}
+			break;
 		case DRM_MODE_SCALE_FULLSCREEN:
 		case DRM_MODE_SCALE_CENTER:
 		case DRM_MODE_SCALE_ASPECT:
@@ -403,6 +404,7 @@ nouveau_connector_destroy(struct drm_connector *connector)
 		drm_dp_cec_unregister_connector(&nv_connector->aux);
 		kfree(nv_connector->aux.name);
 	}
+	nvif_conn_dtor(&nv_connector->conn);
 	kfree(connector);
 }
 
@@ -502,7 +504,8 @@ nouveau_connector_set_encoder(struct drm_connector *connector,
 			connector->interlace_allowed =
 				nv_encoder->caps.dp_interlace;
 		else
-			connector->interlace_allowed = true;
+			connector->interlace_allowed =
+				drm->client.device.info.family < NV_DEVICE_INFO_V0_VOLTA;
 		connector->doublescan_allowed = true;
 	} else
 	if (nv_encoder->dcb->type == DCB_OUTPUT_LVDS ||
@@ -727,7 +730,8 @@ out:
 #endif
 
 	nouveau_connector_set_edid(nv_connector, edid);
-	nouveau_connector_set_encoder(connector, nv_encoder);
+	if (nv_encoder)
+		nouveau_connector_set_encoder(connector, nv_encoder);
 	return status;
 }
 
@@ -984,7 +988,7 @@ nouveau_connector_get_modes(struct drm_connector *connector)
 	 * "native" mode as some VBIOS tables require us to use the
 	 * pixel clock as part of the lookup...
 	 */
-	if (connector->connector_type == DRM_MODE_CONNECTOR_LVDS)
+	if (connector->connector_type == DRM_MODE_CONNECTOR_LVDS && nv_connector->native_mode)
 		nouveau_connector_detect_depth(connector);
 
 	if (nv_encoder->dcb->type == DCB_OUTPUT_TV)
@@ -1103,11 +1107,25 @@ nouveau_connector_best_encoder(struct drm_connector *connector)
 	return NULL;
 }
 
+static int
+nouveau_connector_atomic_check(struct drm_connector *connector, struct drm_atomic_state *state)
+{
+	struct nouveau_connector *nv_conn = nouveau_connector(connector);
+	struct drm_connector_state *conn_state =
+		drm_atomic_get_new_connector_state(state, connector);
+
+	if (!nv_conn->dp_encoder || !nv50_has_mst(nouveau_drm(connector->dev)))
+		return 0;
+
+	return drm_dp_mst_root_conn_atomic_check(conn_state, &nv_conn->dp_encoder->dp.mstm->mgr);
+}
+
 static const struct drm_connector_helper_funcs
 nouveau_connector_helper_funcs = {
 	.get_modes = nouveau_connector_get_modes,
 	.mode_valid = nouveau_connector_mode_valid,
 	.best_encoder = nouveau_connector_best_encoder,
+	.atomic_check = nouveau_connector_atomic_check,
 };
 
 static const struct drm_connector_funcs
@@ -1145,17 +1163,19 @@ nouveau_connector_funcs_lvds = {
 };
 
 void
-nouveau_connector_hpd(struct drm_connector *connector)
+nouveau_connector_hpd(struct nouveau_connector *nv_connector, u64 bits)
 {
-	struct nouveau_drm *drm = nouveau_drm(connector->dev);
-	u32 mask = drm_connector_mask(connector);
+	struct nouveau_drm *drm = nouveau_drm(nv_connector->base.dev);
+	u32 mask = drm_connector_mask(&nv_connector->base);
+	unsigned long flags;
 
-	mutex_lock(&drm->hpd_lock);
+	spin_lock_irqsave(&drm->hpd_lock, flags);
 	if (!(drm->hpd_pending & mask)) {
+		nv_connector->hpd_pending |= bits;
 		drm->hpd_pending |= mask;
 		schedule_work(&drm->hpd_work);
 	}
-	mutex_unlock(&drm->hpd_lock);
+	spin_unlock_irqrestore(&drm->hpd_lock, flags);
 }
 
 static int
@@ -1167,15 +1187,13 @@ nouveau_connector_hotplug(struct nvif_notify *notify)
 	struct drm_device *dev = connector->dev;
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	const struct nvif_notify_conn_rep_v0 *rep = notify->data;
-	bool plugged = (rep->mask != NVIF_NOTIFY_CONN_V0_UNPLUG);
 
 	if (rep->mask & NVIF_NOTIFY_CONN_V0_IRQ) {
 		nouveau_dp_irq(drm, nv_connector);
 		return NVIF_NOTIFY_KEEP;
 	}
 
-	NV_DEBUG(drm, "%splugged %s\n", plugged ? "" : "un", connector->name);
-	nouveau_connector_hpd(connector);
+	nouveau_connector_hpd(nv_connector, rep->mask);
 
 	return NVIF_NOTIFY_KEEP;
 }
@@ -1360,14 +1378,12 @@ nouveau_connector_create(struct drm_device *dev,
 		snprintf(aux_name, sizeof(aux_name), "sor-%04x-%04x",
 			 dcbe->hasht, dcbe->hashm);
 		nv_connector->aux.name = kstrdup(aux_name, GFP_KERNEL);
-		drm_dp_aux_init(&nv_connector->aux);
-		if (ret) {
-			NV_ERROR(drm, "Failed to init AUX adapter for sor-%04x-%04x: %d\n",
-				 dcbe->hasht, dcbe->hashm, ret);
+		if (!nv_connector->aux.name) {
 			kfree(nv_connector);
-			return ERR_PTR(ret);
+			return ERR_PTR(-ENOMEM);
 		}
-		fallthrough;
+		drm_dp_aux_init(&nv_connector->aux);
+		break;
 	default:
 		funcs = &nouveau_connector_funcs;
 		break;
@@ -1386,6 +1402,15 @@ nouveau_connector_create(struct drm_device *dev,
 
 	drm_connector_init(dev, connector, funcs, type);
 	drm_connector_helper_add(connector, &nouveau_connector_helper_funcs);
+
+	if (nv_connector->dcb && (disp->disp.conn_mask & BIT(nv_connector->index))) {
+		ret = nvif_conn_ctor(&disp->disp, nv_connector->base.name, nv_connector->index,
+				     &nv_connector->conn);
+		if (ret) {
+			kfree(nv_connector);
+			return ERR_PTR(ret);
+		}
+	}
 
 	connector->funcs->reset(connector);
 	nouveau_conn_attach_properties(connector);
@@ -1421,6 +1446,8 @@ nouveau_connector_create(struct drm_device *dev,
 
 	switch (type) {
 	case DRM_MODE_CONNECTOR_DisplayPort:
+		nv_connector->dp_encoder = find_encoder(&nv_connector->base, DCB_OUTPUT_DP);
+		fallthrough;
 	case DRM_MODE_CONNECTOR_eDP:
 		drm_dp_cec_register_connector(&nv_connector->aux, connector);
 		break;

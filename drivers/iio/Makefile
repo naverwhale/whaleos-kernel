@@ -15,9 +15,11 @@ obj-$(CONFIG_IIO_TRIGGERED_EVENT) += industrialio-triggered-event.o
 
 obj-y += accel/
 obj-y += adc/
+obj-y += addac/
 obj-y += afe/
 obj-y += amplifiers/
 obj-y += buffer/
+obj-y += cdc/
 obj-y += chemical/
 obj-y += common/
 obj-y += dac/
@@ -38,4 +40,5 @@ obj-y += pressure/
 obj-y += proximity/
 obj-y += resolver/
 obj-y += temperature/
+obj-y += test/
 obj-y += trigger/

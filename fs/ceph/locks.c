@@ -32,18 +32,14 @@ void __init ceph_flock_init(void)
 
 static void ceph_fl_copy_lock(struct file_lock *dst, struct file_lock *src)
 {
-	struct ceph_file_info *fi = dst->fl_file->private_data;
 	struct inode *inode = file_inode(dst->fl_file);
 	atomic_inc(&ceph_inode(inode)->i_filelock_ref);
-	atomic_inc(&fi->num_locks);
 }
 
 static void ceph_fl_release_lock(struct file_lock *fl)
 {
-	struct ceph_file_info *fi = fl->fl_file->private_data;
 	struct inode *inode = file_inode(fl->fl_file);
 	struct ceph_inode_info *ci = ceph_inode(inode);
-	atomic_dec(&fi->num_locks);
 	if (atomic_dec_and_test(&ci->i_filelock_ref)) {
 		/* clear error when all locks are released */
 		spin_lock(&ci->i_ceph_lock);
@@ -57,7 +53,7 @@ static const struct file_lock_operations ceph_fl_lock_ops = {
 	.fl_release_private = ceph_fl_release_lock,
 };
 
-/**
+/*
  * Implement fcntl and flock locking functions.
  */
 static int ceph_lock_message(u8 lock_type, u16 operation, struct inode *inode,
@@ -225,7 +221,7 @@ static int try_unlock_file(struct file *file, struct file_lock *fl)
 	return 1;
 }
 
-/**
+/*
  * Attempt to set an fcntl lock.
  * For now, this just goes away to the server. Later it may be more awesome.
  */
@@ -239,9 +235,6 @@ int ceph_lock(struct file *file, int cmd, struct file_lock *fl)
 	u8 lock_cmd;
 
 	if (!(fl->fl_flags & FL_POSIX))
-		return -ENOLCK;
-	/* No mandatory locks */
-	if (__mandatory_lock(file->f_mapping->host) && fl->fl_type != F_UNLCK)
 		return -ENOLCK;
 
 	dout("ceph_lock, fl_owner: %p\n", fl->fl_owner);
@@ -408,7 +401,7 @@ static int lock_to_ceph_filelock(struct file_lock *lock,
 	return err;
 }
 
-/**
+/*
  * Encode the flock and fcntl locks for the given inode into the ceph_filelock
  * array. Must be called with inode->i_lock already held.
  * If we encounter more of a specific lock type than expected, return -ENOSPC.
@@ -458,7 +451,7 @@ fail:
 	return err;
 }
 
-/**
+/*
  * Copy the encoded flock and fcntl locks into the pagelist.
  * Format is: #fcntl locks, sequential fcntl locks, #flock locks,
  * sequential flock locks.

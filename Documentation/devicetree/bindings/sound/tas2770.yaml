@@ -27,9 +27,11 @@ properties:
        I2C address of the device can be between 0x41 to 0x48.
 
   reset-gpio:
+    maxItems: 1
     description: GPIO used to reset the device.
 
   shutdown-gpios:
+    maxItems: 1
     description: GPIO used to control the state of the device.
 
   interrupts:
@@ -52,7 +54,9 @@ properties:
       - 1 # Falling edge
 
   '#sound-dai-cells':
-    const: 1
+    # The codec has a single DAI, the #sound-dai-cells=<1>; case is left in for backward
+    # compatibility but is deprecated.
+    enum: [0, 1]
 
 required:
   - compatible
@@ -69,7 +73,7 @@ examples:
      codec: codec@41 {
        compatible = "ti,tas2770";
        reg = <0x41>;
-       #sound-dai-cells = <1>;
+       #sound-dai-cells = <0>;
        interrupt-parent = <&gpio1>;
        interrupts = <14>;
        reset-gpio = <&gpio1 15 0>;

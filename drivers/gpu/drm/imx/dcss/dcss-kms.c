@@ -8,7 +8,7 @@
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_helper.h>
-#include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_of.h>
 #include <drm/drm_probe_helper.h>
@@ -17,7 +17,7 @@
 #include "dcss-dev.h"
 #include "dcss-kms.h"
 
-DEFINE_DRM_GEM_CMA_FOPS(dcss_cma_fops);
+DEFINE_DRM_GEM_DMA_FOPS(dcss_cma_fops);
 
 static const struct drm_mode_config_funcs dcss_drm_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create,
@@ -28,7 +28,7 @@ static const struct drm_mode_config_funcs dcss_drm_mode_config_funcs = {
 
 static const struct drm_driver dcss_kms_driver = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
-	DRM_GEM_CMA_DRIVER_OPS,
+	DRM_GEM_DMA_DRIVER_OPS,
 	.fops			= &dcss_cma_fops,
 	.name			= "imx-dcss",
 	.desc			= "i.MX8MQ Display Subsystem",
@@ -93,11 +93,8 @@ static int dcss_kms_bridge_connector_init(struct dcss_kms_dev *kms)
 
 	ret = drm_bridge_attach(encoder, bridge, NULL,
 				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
-	if (ret < 0) {
-		dev_err(ddev->dev, "Unable to attach bridge %pOF\n",
-			bridge->of_node);
+	if (ret < 0)
 		return ret;
-	}
 
 	kms->connector = drm_bridge_connector_init(ddev, encoder);
 	if (IS_ERR(kms->connector)) {
@@ -133,8 +130,6 @@ struct dcss_kms_dev *dcss_kms_attach(struct dcss_dev *dcss)
 	if (ret)
 		goto cleanup_mode_config;
 
-	drm->irq_enabled = true;
-
 	ret = dcss_kms_bridge_connector_init(kms);
 	if (ret)
 		goto cleanup_mode_config;
@@ -146,8 +141,6 @@ struct dcss_kms_dev *dcss_kms_attach(struct dcss_dev *dcss)
 	drm_mode_config_reset(drm);
 
 	drm_kms_helper_poll_init(drm);
-
-	drm_bridge_connector_enable_hpd(kms->connector);
 
 	ret = drm_dev_register(drm, 0);
 	if (ret)
@@ -178,7 +171,6 @@ void dcss_kms_detach(struct dcss_kms_dev *kms)
 	drm_kms_helper_poll_fini(drm);
 	drm_atomic_helper_shutdown(drm);
 	drm_crtc_vblank_off(&kms->crtc.base);
-	drm->irq_enabled = false;
 	drm_mode_config_cleanup(drm);
 	dcss_crtc_deinit(&kms->crtc, drm);
 	drm->dev_private = NULL;

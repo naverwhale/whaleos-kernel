@@ -161,6 +161,7 @@ static int cam_jpeg_mgr_process_irq(void *priv, void *data)
 	if ((p_cfg_req->hw_cfg_args.hw_update_entries[CAM_JPEG_PARAM].offset /
 			sizeof(uint32_t)) >= cmd_buf_len) {
 		CAM_ERR(CAM_JPEG, "Not enough buf");
+		cam_mem_put_cpu_buf(mem_hdl);
 		return -EINVAL;
 	}
 
@@ -186,9 +187,7 @@ static int cam_jpeg_mgr_process_irq(void *priv, void *data)
 
 	list_add_tail(&p_cfg_req->list, &hw_mgr->free_req_list);
 
-	if (cam_mem_put_cpu_buf(mem_hdl))
-		CAM_WARN(CAM_JPEG, "unable to put info for cmd buf: 0x%x",
-			mem_hdl);
+	cam_mem_put_cpu_buf(mem_hdl);
 	return rc;
 }
 
@@ -494,17 +493,15 @@ static int cam_jpeg_mgr_process_cmd(void *priv, void *data)
 		goto rel_cpu_buf;
 	}
 	p_cfg_req->submit_timestamp = cam_common_util_get_curr_timestamp();
-	if (cam_mem_put_cpu_buf(
-		config_args->hw_update_entries[CAM_JPEG_CHBASE].handle))
-		CAM_WARN(CAM_JPEG, "unable to put info for cmd buf: 0x%x",
-			config_args->hw_update_entries[CAM_JPEG_CHBASE].handle);
+	cam_mem_put_cpu_buf(
+		config_args->hw_update_entries[CAM_JPEG_CHBASE].handle);
 
 	mutex_unlock(&hw_mgr->hw_mgr_mutex);
 	return rc;
 
 rel_cpu_buf:
-	if (cam_mem_put_cpu_buf(
-		config_args->hw_update_entries[CAM_JPEG_CHBASE].handle))
+	cam_mem_put_cpu_buf(
+		config_args->hw_update_entries[CAM_JPEG_CHBASE].handle);
 		CAM_WARN(CAM_JPEG, "unable to put info for cmd buf: 0x%x",
 			config_args->hw_update_entries[CAM_JPEG_CHBASE].handle);
 end_callcb:
@@ -780,13 +777,17 @@ static int cam_jpeg_mgr_prepare_hw_update(void *hw_mgr_priv,
 
 	for (i = 0, j = 0, k = 0; i < packet->num_io_configs; i++) {
 		if (io_cfg_ptr[i].direction == CAM_BUF_INPUT) {
+			if (j >= prepare_args->max_in_map_entries)
+				continue;
 			prepare_args->in_map_entries[j].resource_handle =
 				io_cfg_ptr[i].resource_type;
 			prepare_args->in_map_entries[j++].sync_id =
 				io_cfg_ptr[i].fence;
 			prepare_args->num_in_map_entries++;
 		} else {
-			prepare_args->in_map_entries[k].resource_handle =
+			if (k >= prepare_args->max_out_map_entries)
+				continue;
+			prepare_args->out_map_entries[k].resource_handle =
 				io_cfg_ptr[i].resource_type;
 			prepare_args->out_map_entries[k++].sync_id =
 				io_cfg_ptr[i].fence;
@@ -1112,6 +1113,14 @@ hw_dump:
 			dump_args->buf_handle, jpeg_dump_args.buf_len, rc);
 		goto end;
 	}
+
+	if (jpeg_dump_args.buf_len <= dump_args->offset) {
+		CAM_WARN(CAM_JPEG, "dump offset overshoot len %zu offset %u",
+			jpeg_dump_args.buf_len, dump_args->offset);
+		rc = -ENOSPC;
+		goto end;
+	}
+
 	remain_len = jpeg_dump_args.buf_len - dump_args->offset;
 	min_len =  2 * (sizeof(struct cam_jpeg_hw_dump_header) +
 		    CAM_JPEG_HW_DUMP_TAG_MAX_LEN);
@@ -1146,10 +1155,7 @@ hw_dump:
 	}
 	dump_args->offset = jpeg_dump_args.offset;
 end:
-	rc  = cam_mem_put_cpu_buf(dump_args->buf_handle);
-	if (rc)
-		CAM_ERR(CAM_JPEG, "Cpu put failed handle %u",
-			dump_args->buf_handle);
+	cam_mem_put_cpu_buf(dump_args->buf_handle);
 	mutex_unlock(&hw_mgr->hw_mgr_mutex);
 	return rc;
 }
@@ -1643,6 +1649,11 @@ static int cam_jpeg_mgr_cmd(void *hw_mgr_priv, void *cmd_args)
 	}
 
 	return rc;
+}
+
+int cam_jpeg_get_iommu_hd(void)
+{
+	return g_jpeg_hw_mgr.iommu_hdl;
 }
 
 int cam_jpeg_hw_mgr_init(struct device_node *of_node, uint64_t *hw_mgr_hdl,

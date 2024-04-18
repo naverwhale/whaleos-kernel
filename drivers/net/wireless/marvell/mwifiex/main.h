@@ -43,6 +43,7 @@
 #include <linux/gfp.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/kthread.h>
 #include <linux/of_gpio.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -169,6 +170,23 @@ enum {
 #define MWIFIEX_ALIGN_ADDR(p, a) (((long)(p) + (a) - 1) & ~((a) - 1))
 
 #define MWIFIEX_MAC_LOCAL_ADMIN_BIT		41
+
+/* marvell vendor command and event ID */
+#define MWIFIEX_VENDOR_ID  0x005043
+
+/* vendor sub command */
+enum mwifiex_vendor_sub_command {
+	MWIFIEX_VENDOR_CMD_SET_TX_POWER_LIMIT = 0,
+	MWIFIEX_VENDOR_CMD_MAX,
+};
+
+enum mwifiex_vendor_cmd_attr {
+	MWIFIEX_VENDOR_CMD_ATTR_INVALID,
+	MWIFIEX_VENDOR_CMD_ATTR_TXP_LIMIT_24,
+	MWIFIEX_VENDOR_CMD_ATTR_TXP_LIMIT_52,
+	NUM_MWIFIEX_VENDOR_CMD_ATTR,
+	MAX_MWIFIEX_VENDOR_CMD_ATTR = NUM_MWIFIEX_VENDOR_CMD_ATTR - 1,
+};
 
 /**
  *enum mwifiex_debug_level  -  marvell wifi debug level
@@ -869,6 +887,8 @@ struct mwifiex_if_ops {
 };
 
 struct mwifiex_adapter {
+	u8 lowpwr_mode_2g4;
+	u8 lowpwr_mode_5g2;
 	u8 iface_type;
 	unsigned int debug_mask;
 	struct mwifiex_iface_comb iface_limit;
@@ -895,8 +915,8 @@ struct mwifiex_adapter {
 	atomic_t tx_hw_pending;
 	struct workqueue_struct *workqueue;
 	struct work_struct main_work;
-	struct workqueue_struct *rx_workqueue;
-	struct work_struct rx_work;
+	struct kthread_worker *rx_thread;
+	struct kthread_work rx_work;
 	struct workqueue_struct *dfs_workqueue;
 	struct work_struct dfs_work;
 	bool rx_work_enabled;
@@ -1054,6 +1074,8 @@ struct mwifiex_adapter {
 	void *devdump_data;
 	int devdump_len;
 	struct timer_list devdump_timer;
+
+	bool ignore_btcoex_events;
 };
 
 void mwifiex_process_tx_queue(struct mwifiex_adapter *adapter);

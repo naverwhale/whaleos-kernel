@@ -899,6 +899,7 @@
 #define RT5682S_TDM_RX_CH_8			(0x3 << 8)
 #define RT5682S_TDM_ADC_LCA_MASK		(0x7 << 4)
 #define RT5682S_TDM_ADC_LCA_SFT			4
+#define RT5682S_TDM_ADC_DL_MASK			(0x3 << 0)
 #define RT5682S_TDM_ADC_DL_SFT			0
 
 /* TDM control 2 (0x007a) */
@@ -993,6 +994,19 @@
 #define RT5682S_ASRCIN_FTK_M1_SFT		8
 #define RT5682S_ASRCIN_FTK_M2_MASK		(0x7 << 4)
 #define RT5682S_ASRCIN_FTK_M2_SFT		4
+
+/* ASRC Control 11 (0x008c) */
+#define RT5682S_ASRCIN_AUTO_CLKOUT_MASK		(0x1 << 5)
+#define RT5682S_ASRCIN_AUTO_CLKOUT_EN		(0x1 << 5)
+#define RT5682S_ASRCIN_AUTO_CLKOUT_DIS		(0x0 << 5)
+#define RT5682S_ASRCIN_AUTO_RST_MASK		(0x1 << 4)
+#define RT5682S_ASRCIN_AUTO_RST_EN		(0x1 << 4)
+#define RT5682S_ASRCIN_AUTO_RST_DIS		(0x0 << 4)
+#define RT5682S_SEL_LRCK_DET_MASK		(0x3)
+#define RT5682S_SEL_LRCK_DET_DIV8		(0x3)
+#define RT5682S_SEL_LRCK_DET_DIV4		(0x2)
+#define RT5682S_SEL_LRCK_DET_DIV2		(0x1)
+#define RT5682S_SEL_LRCK_DET_DIV1		(0x0)
 
 /* Depop Mode Control 1 (0x008e) */
 #define RT5682S_OUT_HP_L_EN			(0x1 << 6)
@@ -1094,7 +1108,7 @@
 #define RT5682S_PLLA_K_BP_SFT			6
 
 /* PLL M/N/K Code Control 7 (0x009e) */
-#define RT5682S_PLLB_SRC_MASK			(0x3 << 0)
+#define RT5682S_PLLB_SRC_MASK			(0x1)
 #define RT5682S_PLLB_SRC_DFIN			(0x1)
 #define RT5682S_PLLB_SRC_PLLA			(0x0)
 
@@ -1353,6 +1367,11 @@
 #define RT5682S_SAR_SOUR_BTN			(0x3f)
 #define RT5682S_SAR_SOUR_TYPE			(0x0)
 
+/* Headphone Amp Detection Control 1 (0x3b00) */
+#define RT5682S_CP_SW_SIZE_MASK			(0x7 << 4)
+#define RT5682S_CP_SW_SIZE_L			(0x4 << 4)
+#define RT5682S_CP_SW_SIZE_M			(0x2 << 4)
+#define RT5682S_CP_SW_SIZE_S			(0x1 << 4)
 
 #define RT5682S_STEREO_RATES SNDRV_PCM_RATE_8000_192000
 #define RT5682S_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
@@ -1416,7 +1435,13 @@ struct pll_calc_map {
 	bool sel_ps;
 };
 
-#define RT5682S_NUM_SUPPLIES 2
+enum {
+	RT5682S_SUPPLY_AVDD,
+	RT5682S_SUPPLY_MICVDD,
+	RT5682S_SUPPLY_DBVDD,
+	RT5682S_SUPPLY_LDO1_IN,
+	RT5682S_NUM_SUPPLIES,
+};
 
 struct rt5682s_priv {
 	struct snd_soc_component *component;
@@ -1428,6 +1453,7 @@ struct rt5682s_priv {
 	struct delayed_work jd_check_work;
 	struct mutex calibrate_mutex;
 	struct mutex sar_mutex;
+	struct mutex wclk_mutex;
 
 #ifdef CONFIG_COMMON_CLK
 	struct clk_hw dai_clks_hw[RT5682S_DAI_NUM_CLKS];
@@ -1446,7 +1472,9 @@ struct rt5682s_priv {
 	int pll_comb;
 
 	int jack_type;
+	unsigned int irq;
 	int irq_work_delay_time;
+	int wclk_enabled;
 };
 
 int rt5682s_sel_asrc_clk_src(struct snd_soc_component *component,

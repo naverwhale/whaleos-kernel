@@ -1,974 +1,855 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2021, MediaTek Inc.
- * Copyright (c) 2021, Intel Corporation.
+ * Copyright (c) 2021-2022, Intel Corporation.
+ *
+ * Authors:
+ *  Haijun Liu <haijun.liu@mediatek.com>
+ *  Ricardo Martinez <ricardo.martinez@linux.intel.com>
+ *  Sreehari Kancharla <sreehari.kancharla@intel.com>
+ *
+ * Contributors:
+ *  Amir Hanania <amir.hanania@intel.com>
+ *  Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+ *  Chiranjeevi Rapolu <chiranjeevi.rapolu@intel.com>
+ *  Eliot Lee <eliot.lee@intel.com>
+ *  Moises Veleta <moises.veleta@intel.com>
  */
-#include <linux/delay.h>
+
+#include <linux/atomic.h>
+#include <linux/bits.h>
+#include <linux/completion.h>
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
+#include <linux/gfp.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/module.h>
+#include <linux/jiffies.h>
 #include <linux/list.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 #include <linux/spinlock.h>
 
-#include "t7xx_pci.h"
-#include "t7xx_isr.h"
-#include "t7xx_dev_node.h"
+#include "t7xx_mhccif.h"
 #include "t7xx_modem_ops.h"
+#include "t7xx_pci.h"
+#include "t7xx_pci_rescan.h"
+#include "t7xx_pcie_mac.h"
+#include "t7xx_port_devlink.h"
+#include "t7xx_reg.h"
+#include "t7xx_state_monitor.h"
 
-#define RT_IDLE_DELAY 20
-#define PM_ACK_TIMEOUT 1500
-#define PM_RESOURCE_POLL_TIMEOUT 10000
-#define PM_RESOURCE_POLL_STEP 100
-#define PM_RESOURCE_UNLOCK_DELAY 100
+#define T7XX_PCI_IREG_BASE		0
+#define T7XX_PCI_EREG_BASE		2
 
-static bool res_delayed_unlock = true;
+#define PM_SLEEP_DIS_TIMEOUT_MS		20
+#define PM_ACK_TIMEOUT_MS		1500
+#define PM_AUTOSUSPEND_MS		20000
+#define PM_RESOURCE_POLL_TIMEOUT_US	10000
+#define PM_RESOURCE_POLL_STEP_US	100
 
-static const struct pci_device_id mtk_dev_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, MTK_DEV_T7XX) },
-	{ }
+enum t7xx_pm_state {
+	MTK_PM_EXCEPTION,
+	MTK_PM_INIT,		/* Device initialized, but handshake not completed */
+	MTK_PM_SUSPENDED,
+	MTK_PM_RESUMED,
 };
-MODULE_DEVICE_TABLE(pci, mtk_dev_ids);
 
-static void mtk_dev_lock_set(struct mtk_pci_dev *mtk_dev, bool lock)
+static ssize_t cold_reboot_store(struct device *dev, struct device_attribute *attr,
+				 const char *buf, size_t count)
 {
-	void __iomem *ctrl_reg = IREG_BASE(mtk_dev) + PCIE_MISC_CTRL;
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	t7xx_rescan_queue_work(pdev, true);
+	return count;
+}
+
+static DEVICE_ATTR_WO(cold_reboot);
+
+static struct attribute *cold_reboot_attr[] = {
+	&dev_attr_cold_reboot.attr,
+	NULL
+};
+
+static const struct attribute_group cold_reboot_attribute_group = {
+	.attrs = cold_reboot_attr,
+};
+
+static void t7xx_dev_set_sleep_capability(struct t7xx_pci_dev *t7xx_dev, bool enable)
+{
+	void __iomem *ctrl_reg = IREG_BASE(t7xx_dev) + T7XX_PCIE_MISC_CTRL;
 	u32 value;
 
 	value = ioread32(ctrl_reg);
-	if (lock)
-		value |= PCIE_MISC_MAC_SLEEP_DIS;
+
+	if (enable)
+		value &= ~T7XX_PCIE_MISC_MAC_SLEEP_DIS;
 	else
-		value &= ~PCIE_MISC_MAC_SLEEP_DIS;
+		value |= T7XX_PCIE_MISC_MAC_SLEEP_DIS;
+
 	iowrite32(value, ctrl_reg);
 }
 
-static inline void mtk_dev_lock(struct mtk_pci_dev *mtk_dev)
-{
-	mtk_dev_lock_set(mtk_dev, 1);
-}
-
-static inline void mtk_dev_unlock(struct mtk_pci_dev *mtk_dev)
-{
-	mtk_dev_lock_set(mtk_dev, 0);
-}
-
-static void mtk_wait_pm_config(struct mtk_pci_dev *mtk_dev)
+static int t7xx_wait_pm_config(struct t7xx_pci_dev *t7xx_dev)
 {
 	int ret, val;
 
 	ret = read_poll_timeout(ioread32, val,
-				(val & PCIE_RESOURCE_STATUS_MSK) == PCIE_RESOURCE_STATUS_MSK,
-				PM_RESOURCE_POLL_STEP,
-				PM_RESOURCE_POLL_TIMEOUT, true,
-				IREG_BASE(mtk_dev) + PCIE_RESOURCE_STATUS);
+				(val & T7XX_PCIE_RESOURCE_STS_MSK) == T7XX_PCIE_RESOURCE_STS_MSK,
+				PM_RESOURCE_POLL_STEP_US, PM_RESOURCE_POLL_TIMEOUT_US, true,
+				IREG_BASE(t7xx_dev) + T7XX_PCIE_RESOURCE_STATUS);
 	if (ret == -ETIMEDOUT)
-		dev_err(&mtk_dev->pdev->dev, "PM config timeout\n");
-}
-
-static void mtk_l_res_unlock_work(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct mtk_pci_dev *mtk_dev;
-	unsigned long flags;
-
-	mtk_dev = container_of(dwork, struct mtk_pci_dev, l_res_unlock_work);
-	spin_lock_irqsave(&mtk_dev->md_pm_lock, flags);
-
-	if (!atomic_read(&mtk_dev->l_res_lock_count))
-		mtk_dev_unlock(mtk_dev);
-
-	spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-}
-
-static void mtk_pci_pm_init(struct mtk_pci_dev *mtk_dev)
-{
-	struct pci_dev *pdev = mtk_dev->pdev;
-
-	INIT_LIST_HEAD(&mtk_dev->md_pm_entities);
-
-	spin_lock_init(&mtk_dev->md_pm_lock);
-
-	mutex_init(&mtk_dev->md_pm_entity_mtx);
-
-	init_completion(&mtk_dev->l_res_acquire);
-
-	init_completion(&mtk_dev->pm_suspend_ack);
-	init_completion(&mtk_dev->pm_resume_ack);
-
-	init_completion(&mtk_dev->pm_suspend_ack_sap);
-	init_completion(&mtk_dev->pm_resume_ack_sap);
-
-	INIT_DELAYED_WORK(&mtk_dev->l_res_unlock_work, mtk_l_res_unlock_work);
-
-	atomic_set(&mtk_dev->l_res_lock_count, 0);
-	device_init_wakeup(&pdev->dev, true);
-
-	dev_pm_set_driver_flags(&pdev->dev,
-				pdev->dev.power.driver_flags |
-				DPM_FLAG_NO_DIRECT_COMPLETE);
-
-	atomic_set(&mtk_dev->md_pm_init_done, 0);
-	atomic_set(&mtk_dev->md_pm_resumed, 1);
-
-	atomic_set(&mtk_dev->pm_counter, 0);
-
-	iowrite32(L1_DISABLE_BIT(0),
-		  IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_SET_0);
-	mtk_wait_pm_config(mtk_dev);
-}
-
-void mtk_pci_pm_init_late(struct mtk_pci_dev *mtk_dev)
-{
-	/* enable the PCIe Resource Lock only after MD deep sleep is done */
-	mhccif_mask_clr(mtk_dev,
-			D2H_INT_DS_LOCK_ACK |
-			D2H_INT_SUSPEND_ACK |
-			D2H_INT_RESUME_ACK |
-			D2H_INT_SUSPEND_ACK_AP |
-			D2H_INT_RESUME_ACK_AP);
-	iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_CLR_0);
-	atomic_inc(&mtk_dev->md_pm_init_done);
-
-	/* enable runtime PM only after CCCI HS is done */
-	pm_runtime_put_noidle(&mtk_dev->pdev->dev);
-}
-
-static void mtk_pci_pm_deinit(struct mtk_pci_dev *mtk_dev)
-{
-	cancel_delayed_work_sync(&mtk_dev->l_res_unlock_work);
-}
-
-static void mtk_pci_pm_reinit(struct mtk_pci_dev *mtk_dev)
-{
-	/* The device is kept in FSM re-init flow
-	 * so just roll back PM setting to the init setting
-	 */
-	atomic_set(&mtk_dev->md_pm_init_done, 0);
-	atomic_set(&mtk_dev->md_pm_resumed, 1);
-
-	pm_runtime_get_noresume(&mtk_dev->pdev->dev);
-
-	iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_SET_0);
-	mtk_wait_pm_config(mtk_dev);
-}
-
-void mtk_pci_pm_exp_detected(struct mtk_pci_dev *mtk_dev)
-{
-	iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_SET_0);
-	mtk_wait_pm_config(mtk_dev);
-	atomic_dec(&mtk_dev->md_pm_init_done);
-}
-
-int mtk_pci_pm_entity_register(struct mtk_pci_dev *mtk_dev,
-			       struct md_pm_entity *pm_entity)
-{
-	struct md_pm_entity *entity, *tmp_entity;
-
-	mutex_lock(&mtk_dev->md_pm_entity_mtx);
-	list_for_each_entry_safe(entity, tmp_entity, &mtk_dev->md_pm_entities, entity) {
-		if (entity->key == pm_entity->key) {
-			dev_err(&mtk_dev->pdev->dev, "Registering an exist PM entity %d\n",
-				pm_entity->key);
-			mutex_unlock(&mtk_dev->md_pm_entity_mtx);
-			return -EALREADY;
-		}
-	}
-	list_add_tail(&pm_entity->entity, &mtk_dev->md_pm_entities);
-	mutex_unlock(&mtk_dev->md_pm_entity_mtx);
-	return 0;
-}
-
-int mtk_pci_pm_entity_unregister(struct mtk_pci_dev *mtk_dev,
-				 struct md_pm_entity *pm_entity)
-{
-	struct md_pm_entity *entity;
-
-	mutex_lock(&mtk_dev->md_pm_entity_mtx);
-
-	list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
-		if (entity->key == pm_entity->key) {
-			list_del(&pm_entity->entity);
-			mutex_unlock(&mtk_dev->md_pm_entity_mtx);
-			return 0;
-		}
-	}
-	mutex_unlock(&mtk_dev->md_pm_entity_mtx);
-
-	return -EALREADY;
-}
-
-void mtk_pci_l_resource_wait_complete(struct mtk_pci_dev *mtk_dev)
-{
-	if (mtk_dev->pm_enabled)
-		wait_for_completion(&mtk_dev->l_res_acquire);
-}
-
-bool mtk_pci_l_resource_try_wait_complete(struct mtk_pci_dev *mtk_dev)
-{
-	if (mtk_dev->pm_enabled)
-		return try_wait_for_completion(&mtk_dev->l_res_acquire);
-
-	return true;
-}
-
-void mtk_pci_l_resource_lock(struct mtk_pci_dev *mtk_dev)
-{
-	unsigned long flags;
-
-	if (!mtk_dev->pm_enabled)
-		return;
-
-	if ((atomic_read(&mtk_dev->md_pm_init_done) < 1) ||
-	    (!atomic_read(&mtk_dev->md_pm_resumed))) {
-		atomic_inc(&mtk_dev->l_res_lock_count);
-		complete_all(&mtk_dev->l_res_acquire);
-		return;
-	}
-
-	spin_lock_irqsave(&mtk_dev->md_pm_lock, flags);
-	if (atomic_inc_return(&mtk_dev->l_res_lock_count) == 1) {
-		reinit_completion(&mtk_dev->l_res_acquire);
-		mtk_dev_lock(mtk_dev);
-
-		if ((ioread32(IREG_BASE(mtk_dev) + PCIE_RESOURCE_STATUS) &
-		     PCIE_RESOURCE_STATUS_MSK) == PCIE_RESOURCE_STATUS_MSK) {
-			spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-			complete_all(&mtk_dev->l_res_acquire);
-			return;
-		}
-
-		mhccif_h2d_swint_trigger(mtk_dev, H2D_CH_DS_LOCK);
-		spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-		return;
-	}
-	spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-}
-
-void mtk_pci_l_resource_unlock(struct mtk_pci_dev *mtk_dev)
-{
-	unsigned long flags;
-
-	if (!mtk_dev->pm_enabled)
-		return;
-
-	if ((atomic_read(&mtk_dev->md_pm_init_done) < 1) ||
-	    (!atomic_read(&mtk_dev->md_pm_resumed))) {
-		atomic_dec(&mtk_dev->l_res_lock_count);
-		return;
-	}
-
-	if (atomic_dec_and_test(&mtk_dev->l_res_lock_count)) {
-		if (res_delayed_unlock) {
-			cancel_delayed_work(&mtk_dev->l_res_unlock_work);
-			schedule_delayed_work(&mtk_dev->l_res_unlock_work,
-					      msecs_to_jiffies(PM_RESOURCE_UNLOCK_DELAY));
-		} else {
-			spin_lock_irqsave(&mtk_dev->md_pm_lock, flags);
-			mtk_dev_unlock(mtk_dev);
-			spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-		}
-	}
-}
-
-static int __mtk_pci_wait_suspend_ack(struct mtk_pci_dev *mtk_dev)
-{
-	return wait_for_completion_timeout(&mtk_dev->pm_suspend_ack,
-					   msecs_to_jiffies(PM_ACK_TIMEOUT));
-}
-
-static int __mtk_pci_wait_resume_ack(struct mtk_pci_dev *mtk_dev)
-{
-	return wait_for_completion_timeout(&mtk_dev->pm_resume_ack,
-					   msecs_to_jiffies(PM_ACK_TIMEOUT));
-}
-
-static int __mtk_pci_wait_suspend_ack_sap(struct mtk_pci_dev *mtk_dev)
-{
-	return wait_for_completion_timeout(&mtk_dev->pm_suspend_ack_sap,
-					   msecs_to_jiffies(PM_ACK_TIMEOUT));
-}
-
-static int __mtk_pci_wait_resume_ack_sap(struct mtk_pci_dev *mtk_dev)
-{
-	return wait_for_completion_timeout(&mtk_dev->pm_resume_ack_sap,
-					   msecs_to_jiffies(PM_ACK_TIMEOUT));
-}
-
-/* Counter to distinguish suspend/resume cycles */
-static void mtk_pci_pm_counter(struct mtk_pci_dev *mtk_dev, u32 header)
-{
-	u32 pm_cnt = atomic_inc_return(&mtk_dev->pm_counter) & 0xffff;
-
-	iowrite32(header | pm_cnt,
-		  mtk_dev->base_addr.mhccif_rc_base + MHCCIF_H2D_REG_PCIE_PM_COUNTER);
-}
-
-static int __mtk_pci_pm_suspend(struct pci_dev *pdev, bool is_runtime)
-{
-	struct mtk_pci_dev *mtk_dev = pci_get_drvdata(pdev);
-	struct md_pm_entity *entity;
-	unsigned long wait_ret;
-	unsigned int key = 255;
-	int ret = 0;
-
-	if (!mtk_dev->pm_enabled)
-		return 0;
-
-	if (atomic_read(&mtk_dev->md_pm_init_done) < 1) {
-		dev_err(&pdev->dev,
-			"[PM] Suspend Exit Because CCCI not Handshaked or in EE\n");
-		return -EFAULT;
-	}
-
-	iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_SET_0);
-	mtk_wait_pm_config(mtk_dev);
-
-	atomic_dec(&mtk_dev->md_pm_resumed);
-
-	mtk_clear_set_int_type(mtk_dev, SAP_RGU_INT, true);
-	atomic_set(&mtk_dev->rgu_pci_irq_en, 0);
-
-	list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
-		if (entity->suspend) {
-			ret = entity->suspend(mtk_dev, entity->entity_param);
-			if (ret) {
-				key = entity->key;
-				break;
-			}
-		}
-	}
-
-	if (ret) {
-		dev_err(&pdev->dev, "[PM] Suspend error %d, key %d\n", ret, key);
-
-		list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
-			if (key == entity->key)
-				break;
-			if (entity->resume)
-				entity->resume(mtk_dev, entity->entity_param);
-		}
-		goto suspend_complete;
-	}
-
-	reinit_completion(&mtk_dev->pm_suspend_ack);
-	reinit_completion(&mtk_dev->pm_suspend_ack_sap);
-	/* Start to let device enter D3/L2 */
-	mtk_pci_pm_counter(mtk_dev, PM_SUSPEND_HEADER);
-	/* send d3 enter requests */
-	mhccif_h2d_swint_trigger(mtk_dev, H2D_CH_SUSPEND_REQ);
-	mhccif_h2d_swint_trigger(mtk_dev, H2D_CH_SUSPEND_REQ_AP);
-
-	wait_ret = __mtk_pci_wait_suspend_ack(mtk_dev);
-	if (!wait_ret)
-		dev_err(&pdev->dev, "[PM] Wait for device suspend ACK timeout\n");
-
-	wait_ret = __mtk_pci_wait_suspend_ack_sap(mtk_dev);
-	if (!wait_ret)
-		dev_err(&pdev->dev, "[PM] Wait for device suspend ACK timeout-SAP\n");
-
-	/* Each HW's final work */
-	list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
-		if (entity->suspend_late) {
-			ret = entity->suspend_late(mtk_dev, entity->entity_param);
-			if (ret) {
-				key = entity->key;
-				break;
-			}
-		}
-	}
-
-	if (res_delayed_unlock) {
-		unsigned long flags = 0;
-
-		cancel_delayed_work_sync(&mtk_dev->l_res_unlock_work);
-		if (!atomic_read(&mtk_dev->l_res_lock_count)) {
-			spin_lock_irqsave(&mtk_dev->md_pm_lock, flags);
-			mtk_dev_unlock(mtk_dev);
-			spin_unlock_irqrestore(&mtk_dev->md_pm_lock, flags);
-		} else {
-			dev_err(&pdev->dev, "[PM] resource lock count is not zero\n");
-		}
-	}
-
-	if (ret)
-		dev_err(&pdev->dev, "[PM] Suspend Late Entry error %d, key %d\n", ret, key);
-
-suspend_complete:
-	if (ret) {
-		iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_CLR_0);
-		atomic_inc(&mtk_dev->md_pm_resumed);
-		mtk_clear_set_int_type(mtk_dev, SAP_RGU_INT, false);
-	}
+		dev_err(&t7xx_dev->pdev->dev, "PM configuration timed out\n");
 
 	return ret;
 }
 
-static void mtk_pcie_interrupt_reinit(struct mtk_pci_dev *mtk_dev)
+static int t7xx_pci_pm_init(struct t7xx_pci_dev *t7xx_dev)
 {
-	void __iomem *pbase = IREG_BASE(mtk_dev);
+	struct pci_dev *pdev = t7xx_dev->pdev;
 
-	mtk_msix_ctrl_cfg(pbase, mtk_dev->irq_count);
+	INIT_LIST_HEAD(&t7xx_dev->md_pm_entities);
+	mutex_init(&t7xx_dev->md_pm_entity_mtx);
+	spin_lock_init(&t7xx_dev->md_pm_lock);
+	init_completion(&t7xx_dev->sleep_lock_acquire);
+	init_completion(&t7xx_dev->pm_sr_ack);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_INIT);
 
-	/* disable interrupt first and let the IPs enable them */
-	iowrite32(MSIX_MSK_SET_ALL, pbase + IMASK_HOST_MSIX_CLR_GRP0_0);
+	device_init_wakeup(&pdev->dev, true);
+	dev_pm_set_driver_flags(&pdev->dev, pdev->dev.power.driver_flags |
+				DPM_FLAG_NO_DIRECT_COMPLETE);
 
-	/* L2 resume device will disable PCIe interrupt, and
-	 * this function can re-enable PCIe interrupt for L3,
-	 * just do this with no effect.
-	 */
-	mtk_enable_disable_int(pbase, true);
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + DISABLE_ASPM_LOWPWR);
+	pm_runtime_set_autosuspend_delay(&pdev->dev, PM_AUTOSUSPEND_MS);
+	pm_runtime_use_autosuspend(&pdev->dev);
 
-	mtk_clear_set_int_type(mtk_dev, MHCCIF_INT, false);
+	t7xx_wait_pm_config(t7xx_dev);
+	return 0;
 }
 
-static int mtk_pcie_reinit(struct mtk_pci_dev *mtk_dev, bool pcie_only)
+void t7xx_pci_pm_init_late(struct t7xx_pci_dev *t7xx_dev)
 {
-	int ret = pci_enable_device(mtk_dev->pdev);
+	/* Enable the PCIe resource lock only after MD deep sleep is done */
+	t7xx_mhccif_mask_clr(t7xx_dev,
+			     D2H_INT_DS_LOCK_ACK |
+			     D2H_INT_SUSPEND_ACK |
+			     D2H_INT_RESUME_ACK |
+			     D2H_INT_SUSPEND_ACK_AP |
+			     D2H_INT_RESUME_ACK_AP);
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_RESUMED);
 
+	pm_runtime_mark_last_busy(&t7xx_dev->pdev->dev);
+	pm_runtime_allow(&t7xx_dev->pdev->dev);
+	pm_runtime_put_noidle(&t7xx_dev->pdev->dev);
+}
+
+static int t7xx_pci_pm_reinit(struct t7xx_pci_dev *t7xx_dev)
+{
+	/* The device is kept in FSM re-init flow
+	 * so just roll back PM setting to the init setting.
+	 */
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_INIT);
+
+	pm_runtime_get_noresume(&t7xx_dev->pdev->dev);
+
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + DISABLE_ASPM_LOWPWR);
+	return t7xx_wait_pm_config(t7xx_dev);
+}
+
+void t7xx_pci_pm_exp_detected(struct t7xx_pci_dev *t7xx_dev)
+{
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + DISABLE_ASPM_LOWPWR);
+	t7xx_wait_pm_config(t7xx_dev);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_EXCEPTION);
+}
+
+int t7xx_pci_pm_entity_register(struct t7xx_pci_dev *t7xx_dev, struct md_pm_entity *pm_entity)
+{
+	struct md_pm_entity *entity;
+
+	mutex_lock(&t7xx_dev->md_pm_entity_mtx);
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
+		if (entity->id == pm_entity->id) {
+			mutex_unlock(&t7xx_dev->md_pm_entity_mtx);
+			return -EEXIST;
+		}
+	}
+
+	list_add_tail(&pm_entity->entity, &t7xx_dev->md_pm_entities);
+	mutex_unlock(&t7xx_dev->md_pm_entity_mtx);
+	return 0;
+}
+
+int t7xx_pci_pm_entity_unregister(struct t7xx_pci_dev *t7xx_dev, struct md_pm_entity *pm_entity)
+{
+	struct md_pm_entity *entity, *tmp_entity;
+
+	mutex_lock(&t7xx_dev->md_pm_entity_mtx);
+	list_for_each_entry_safe(entity, tmp_entity, &t7xx_dev->md_pm_entities, entity) {
+		if (entity->id == pm_entity->id) {
+			list_del(&pm_entity->entity);
+			mutex_unlock(&t7xx_dev->md_pm_entity_mtx);
+			return 0;
+		}
+	}
+
+	mutex_unlock(&t7xx_dev->md_pm_entity_mtx);
+
+	return -ENXIO;
+}
+
+int t7xx_pci_sleep_disable_complete(struct t7xx_pci_dev *t7xx_dev)
+{
+	struct device *dev = &t7xx_dev->pdev->dev;
+	int ret;
+
+	ret = wait_for_completion_timeout(&t7xx_dev->sleep_lock_acquire,
+					  msecs_to_jiffies(PM_SLEEP_DIS_TIMEOUT_MS));
+	if (!ret)
+		dev_err_ratelimited(dev, "Resource wait complete timed out\n");
+
+	return ret;
+}
+
+/**
+ * t7xx_pci_disable_sleep() - Disable deep sleep capability.
+ * @t7xx_dev: MTK device.
+ *
+ * Lock the deep sleep capability, note that the device can still go into deep sleep
+ * state while device is in D0 state, from the host's point-of-view.
+ *
+ * If device is in deep sleep state, wake up the device and disable deep sleep capability.
+ */
+void t7xx_pci_disable_sleep(struct t7xx_pci_dev *t7xx_dev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&t7xx_dev->md_pm_lock, flags);
+	t7xx_dev->sleep_disable_count++;
+	if (atomic_read(&t7xx_dev->md_pm_state) < MTK_PM_RESUMED)
+		goto unlock_and_complete;
+
+	if (t7xx_dev->sleep_disable_count == 1) {
+		u32 status;
+
+		reinit_completion(&t7xx_dev->sleep_lock_acquire);
+		t7xx_dev_set_sleep_capability(t7xx_dev, false);
+
+		status = ioread32(IREG_BASE(t7xx_dev) + T7XX_PCIE_RESOURCE_STATUS);
+		if (status & T7XX_PCIE_RESOURCE_STS_MSK)
+			goto unlock_and_complete;
+
+		t7xx_mhccif_h2d_swint_trigger(t7xx_dev, H2D_CH_DS_LOCK);
+	}
+	spin_unlock_irqrestore(&t7xx_dev->md_pm_lock, flags);
+	return;
+
+unlock_and_complete:
+	spin_unlock_irqrestore(&t7xx_dev->md_pm_lock, flags);
+	complete_all(&t7xx_dev->sleep_lock_acquire);
+}
+
+/**
+ * t7xx_pci_enable_sleep() - Enable deep sleep capability.
+ * @t7xx_dev: MTK device.
+ *
+ * After enabling deep sleep, device can enter into deep sleep state.
+ */
+void t7xx_pci_enable_sleep(struct t7xx_pci_dev *t7xx_dev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&t7xx_dev->md_pm_lock, flags);
+	t7xx_dev->sleep_disable_count--;
+	if (atomic_read(&t7xx_dev->md_pm_state) < MTK_PM_RESUMED)
+		goto unlock;
+
+	if (t7xx_dev->sleep_disable_count == 0)
+		t7xx_dev_set_sleep_capability(t7xx_dev, true);
+
+unlock:
+	spin_unlock_irqrestore(&t7xx_dev->md_pm_lock, flags);
+}
+
+static int t7xx_send_pm_request(struct t7xx_pci_dev *t7xx_dev, u32 request)
+{
+	unsigned long wait_ret;
+
+	reinit_completion(&t7xx_dev->pm_sr_ack);
+	t7xx_mhccif_h2d_swint_trigger(t7xx_dev, request);
+	wait_ret = wait_for_completion_timeout(&t7xx_dev->pm_sr_ack,
+					       msecs_to_jiffies(PM_ACK_TIMEOUT_MS));
+	if (!wait_ret)
+		return -ETIMEDOUT;
+
+	return 0;
+}
+
+static int __t7xx_pci_pm_suspend(struct pci_dev *pdev)
+{
+	enum t7xx_pm_id entity_id = PM_ENTITY_ID_INVALID;
+	struct t7xx_pci_dev *t7xx_dev;
+	struct md_pm_entity *entity;
+	int ret;
+
+	t7xx_dev = pci_get_drvdata(pdev);
+	if (atomic_read(&t7xx_dev->md_pm_state) <= MTK_PM_INIT) {
+		dev_err(&pdev->dev, "[PM] Exiting suspend, modem in invalid state\n");
+		return -EFAULT;
+	}
+
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + DISABLE_ASPM_LOWPWR);
+	ret = t7xx_wait_pm_config(t7xx_dev);
 	if (ret) {
-		dev_err(&mtk_dev->pdev->dev, "pci_enable_device return fail\n");
+		iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
 		return ret;
 	}
 
-	mtk_atr_init(mtk_dev);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_SUSPENDED);
+	t7xx_pcie_mac_clear_int(t7xx_dev, SAP_RGU_INT);
+	t7xx_dev->rgu_pci_irq_en = false;
 
-	/* interrupt re-init, in case this is MSIX interrupt with merged entries.*/
-	mtk_pcie_interrupt_reinit(mtk_dev);
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
+		if (!entity->suspend)
+			continue;
 
-	/* Enable PCIe bus master */
-	pci_set_master(mtk_dev->pdev);
+		ret = entity->suspend(t7xx_dev, entity->entity_param);
+		if (ret) {
+			entity_id = entity->id;
+			dev_err(&pdev->dev, "[PM] Suspend error: %d, id: %d\n", ret, entity_id);
+			goto abort_suspend;
+		}
+	}
 
-	if (!pcie_only) {
-		mhccif_init(mtk_dev);
-		mtk_pci_pm_reinit(mtk_dev);
+	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_SUSPEND_REQ);
+	if (ret) {
+		dev_err(&pdev->dev, "[PM] MD suspend error: %d\n", ret);
+		goto abort_suspend;
+	}
+
+	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_SUSPEND_REQ_AP);
+	if (ret) {
+		t7xx_send_pm_request(t7xx_dev, H2D_CH_RESUME_REQ);
+		dev_err(&pdev->dev, "[PM] SAP suspend error: %d\n", ret);
+		goto abort_suspend;
+	}
+
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
+		if (entity->suspend_late)
+			entity->suspend_late(t7xx_dev, entity->entity_param);
+	}
+
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
+	return 0;
+
+abort_suspend:
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
+		if (entity_id == entity->id)
+			break;
+
+		if (entity->resume)
+			entity->resume(t7xx_dev, entity->entity_param);
+	}
+
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_RESUMED);
+	t7xx_pcie_mac_set_int(t7xx_dev, SAP_RGU_INT);
+	return ret;
+}
+
+static void t7xx_pcie_interrupt_reinit(struct t7xx_pci_dev *t7xx_dev)
+{
+	t7xx_pcie_set_mac_msix_cfg(t7xx_dev, EXT_INT_NUM);
+
+	/* Disable interrupt first and let the IPs enable them */
+	iowrite32(MSIX_MSK_SET_ALL, IREG_BASE(t7xx_dev) + IMASK_HOST_MSIX_CLR_GRP0_0);
+
+	/* Device disables PCIe interrupts during resume and
+	 * following function will re-enable PCIe interrupts.
+	 */
+	t7xx_pcie_mac_interrupts_en(t7xx_dev);
+	t7xx_pcie_mac_set_int(t7xx_dev, MHCCIF_INT);
+}
+
+static int t7xx_pcie_reinit(struct t7xx_pci_dev *t7xx_dev, bool is_d3)
+{
+	int ret;
+
+	ret = pcim_enable_device(t7xx_dev->pdev);
+	if (ret)
+		return ret;
+
+	t7xx_pcie_mac_atr_init(t7xx_dev);
+	t7xx_pcie_interrupt_reinit(t7xx_dev);
+
+	if (is_d3) {
+		t7xx_mhccif_init(t7xx_dev);
+		return t7xx_pci_pm_reinit(t7xx_dev);
 	}
 
 	return 0;
 }
 
-static int __mtk_pci_pm_resume(struct pci_dev *pdev, bool state_check,
-			       bool is_runtime)
+static int t7xx_send_fsm_command(struct t7xx_pci_dev *t7xx_dev, u32 event)
 {
-	struct mtk_pci_dev *mtk_dev = pci_get_drvdata(pdev);
+	struct t7xx_fsm_ctl *fsm_ctl = t7xx_dev->md->fsm_ctl;
+	struct device *dev = &t7xx_dev->pdev->dev;
+	int ret = -EINVAL;
+
+	switch (event) {
+	case FSM_CMD_STOP:
+		ret = t7xx_fsm_append_cmd(fsm_ctl, FSM_CMD_STOP, FSM_CMD_FLAG_WAIT_FOR_COMPLETION);
+		break;
+
+	case FSM_CMD_START:
+		t7xx_pcie_mac_clear_int(t7xx_dev, SAP_RGU_INT);
+		t7xx_pcie_mac_clear_int_status(t7xx_dev, SAP_RGU_INT);
+		t7xx_dev->rgu_pci_irq_en = true;
+		t7xx_pcie_mac_set_int(t7xx_dev, SAP_RGU_INT);
+		ret = t7xx_fsm_append_cmd(fsm_ctl, FSM_CMD_START, 0);
+		break;
+
+	default:
+		break;
+	}
+
+	if (ret)
+		dev_err(dev, "Failure handling FSM command %u, %d\n", event, ret);
+
+	return ret;
+}
+
+static int __t7xx_pci_pm_resume(struct pci_dev *pdev, bool state_check)
+{
+	struct t7xx_pci_dev *t7xx_dev;
 	struct md_pm_entity *entity;
-	unsigned long wait_ret;
-	unsigned int key = 255;
-	u32 resume_reg_state;
+	u32 prev_state;
 	int ret = 0;
 
-	pci_set_master(pdev);
-
-	if (!mtk_dev->pm_enabled)
+	t7xx_dev = pci_get_drvdata(pdev);
+	if (atomic_read(&t7xx_dev->md_pm_state) <= MTK_PM_INIT) {
+		iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
 		return 0;
+	}
 
-	if (atomic_read(&mtk_dev->md_pm_init_done) < 1)
-		goto resume_complete;
-
-	/* Get the previous state */
-	resume_reg_state = ioread32(IREG_BASE(mtk_dev) + PCIE_DEBUG_DUMMY_3);
+	t7xx_pcie_mac_interrupts_en(t7xx_dev);
+	prev_state = ioread32(IREG_BASE(t7xx_dev) + T7XX_PCIE_PM_RESUME_STATE);
 
 	if (state_check) {
 		/* For D3/L3 resume, the device could boot so quickly that the
 		 * initial value of the dummy register might be overwritten.
-		 * We use atr_reg_val to help identify new boots.
-		 * If it is not set by Host Driver, the value is 0x7F
+		 * Identify new boots if the ATR source address register is not initialized.
 		 */
-		u32 atr_reg_val = ioread32(IREG_BASE(mtk_dev) +
-					   ATR_PCIE_WIN0_T0_ATR_PARAM_SRC_ADDR_LSB);
+		u32 atr_reg_val = ioread32(IREG_BASE(t7xx_dev) +
+					   ATR_PCIE_WIN0_T0_ATR_PARAM_SRC_ADDR);
+		if (prev_state == PM_RESUME_REG_STATE_L3 ||
+		    (prev_state == PM_RESUME_REG_STATE_INIT &&
+		     atr_reg_val == ATR_SRC_ADDR_INVALID)) {
+			ret = t7xx_send_fsm_command(t7xx_dev, FSM_CMD_STOP);
+			if (ret)
+				return ret;
 
-		if (resume_reg_state == PM_RESUME_REG_STATE_L3 ||
-		    (resume_reg_state == PM_RESUME_REG_STATE_INIT && atr_reg_val == 0x7f)) {
-			ret = mtk_pci_event_handler(mtk_dev, PCIE_EVENT_L3ENTER);
+			ret = t7xx_pcie_reinit(t7xx_dev, true);
 			if (ret)
 				return ret;
-			ret = mtk_pcie_reinit(mtk_dev, false);
-			if (ret)
-				return ret;
-			mtk_clear_rgu_irq(mtk_dev);
-			return mtk_pci_event_handler(mtk_dev, PCIE_EVENT_L3EXIT);
-		} else if (resume_reg_state == PM_RESUME_REG_STATE_EXP ||
-			   resume_reg_state == PM_RESUME_REG_STATE_L2_EXP) {
-			if (resume_reg_state == PM_RESUME_REG_STATE_L2_EXP) {
-				ret = mtk_pcie_reinit(mtk_dev, true);
+
+			t7xx_clear_rgu_irq(t7xx_dev);
+			return t7xx_send_fsm_command(t7xx_dev, FSM_CMD_START);
+		}
+
+		if (prev_state == PM_RESUME_REG_STATE_EXP ||
+		    prev_state == PM_RESUME_REG_STATE_L2_EXP) {
+			if (prev_state == PM_RESUME_REG_STATE_L2_EXP) {
+				ret = t7xx_pcie_reinit(t7xx_dev, false);
 				if (ret)
 					return ret;
 			}
-			atomic_dec(&mtk_dev->md_pm_init_done);
-			atomic_set(&mtk_dev->rgu_pci_irq_en, 1);
-			mtk_clear_set_int_type(mtk_dev, SAP_RGU_INT, false);
 
-			mhccif_mask_clr(mtk_dev,
-					D2H_INT_EXCEPTION_INIT |
-					D2H_INT_EXCEPTION_INIT_DONE |
-					D2H_INT_EXCEPTION_CLEARQ_DONE |
-					D2H_INT_EXCEPTION_ALLQ_RESET |
-					D2H_INT_PORT_ENUM);
+			atomic_set(&t7xx_dev->md_pm_state, MTK_PM_SUSPENDED);
+			t7xx_dev->rgu_pci_irq_en = true;
+			t7xx_pcie_mac_set_int(t7xx_dev, SAP_RGU_INT);
+
+			t7xx_mhccif_mask_clr(t7xx_dev,
+					     D2H_INT_EXCEPTION_INIT |
+					     D2H_INT_EXCEPTION_INIT_DONE |
+					     D2H_INT_EXCEPTION_CLEARQ_DONE |
+					     D2H_INT_EXCEPTION_ALLQ_RESET |
+					     D2H_INT_PORT_ENUM);
 
 			return ret;
-		} else if (resume_reg_state == PM_RESUME_REG_STATE_L2) {
-			ret = mtk_pcie_reinit(mtk_dev, true);
-			if (ret)
-				return ret;
-		} else if (resume_reg_state != PM_RESUME_REG_STATE_L1 &&
-			   resume_reg_state != PM_RESUME_REG_STATE_INIT) {
-			ret = mtk_pci_event_handler(mtk_dev, PCIE_EVENT_L3ENTER);
+		}
+
+		if (prev_state == PM_RESUME_REG_STATE_L2) {
+			ret = t7xx_pcie_reinit(t7xx_dev, false);
 			if (ret)
 				return ret;
 
-			mtk_clear_rgu_irq(mtk_dev);
-			atomic_dec(&mtk_dev->md_pm_init_done);
+		} else if (prev_state != PM_RESUME_REG_STATE_L1 &&
+			   prev_state != PM_RESUME_REG_STATE_INIT) {
+			ret = t7xx_send_fsm_command(t7xx_dev, FSM_CMD_STOP);
+			if (ret)
+				return ret;
+
+			t7xx_clear_rgu_irq(t7xx_dev);
+			atomic_set(&t7xx_dev->md_pm_state, MTK_PM_SUSPENDED);
 			return 0;
 		}
 	}
 
-	list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
-		if (entity->resume_early) {
-			ret = entity->resume_early(mtk_dev, entity->entity_param);
-			if (ret) {
-				key = entity->key;
-				dev_err(&pdev->dev,
-					"[PM] Resume early Key %d ret %d\n",
-					key, ret);
-			}
-		}
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + DISABLE_ASPM_LOWPWR);
+	t7xx_wait_pm_config(t7xx_dev);
+
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
+		if (entity->resume_early)
+			entity->resume_early(t7xx_dev, entity->entity_param);
 	}
 
-	reinit_completion(&mtk_dev->pm_resume_ack);
-	reinit_completion(&mtk_dev->pm_resume_ack_sap);
+	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_RESUME_REQ);
+	if (ret)
+		dev_err(&pdev->dev, "[PM] MD resume error: %d\n", ret);
 
-	mtk_pci_pm_counter(mtk_dev, PM_RESUME_HEADER);
-	/* send d3 exit requests */
-	mhccif_h2d_swint_trigger(mtk_dev, H2D_CH_RESUME_REQ);
-	mhccif_h2d_swint_trigger(mtk_dev, H2D_CH_RESUME_REQ_AP);
+	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_RESUME_REQ_AP);
+	if (ret)
+		dev_err(&pdev->dev, "[PM] SAP resume error: %d\n", ret);
 
-	wait_ret = __mtk_pci_wait_resume_ack(mtk_dev);
-	if (!wait_ret)
-		dev_err(&pdev->dev, "[PM] Wait for device resume ACK timeout\n");
-
-	wait_ret = __mtk_pci_wait_resume_ack_sap(mtk_dev);
-	if (!wait_ret)
-		dev_err(&pdev->dev, "[PM] Wait for device resume ACK timeout-SAP\n");
-
-	/* Each HW final restore works */
-	list_for_each_entry(entity, &mtk_dev->md_pm_entities, entity) {
+	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
 		if (entity->resume) {
-			ret = entity->resume(mtk_dev, entity->entity_param);
-			if (ret) {
-				key = entity->key;
-				dev_err(&pdev->dev,
-					"[PM] Resume entry key %d ret %d\n",
-					key, ret);
-			}
+			ret = entity->resume(t7xx_dev, entity->entity_param);
+			if (ret)
+				dev_err(&pdev->dev, "[PM] Resume entry ID: %d error: %d\n",
+					entity->id, ret);
 		}
 	}
 
-	atomic_set(&mtk_dev->rgu_pci_irq_en, 1);
-	mtk_clear_set_int_type(mtk_dev, SAP_RGU_INT, false);
+	t7xx_dev->rgu_pci_irq_en = true;
+	t7xx_pcie_mac_set_int(t7xx_dev, SAP_RGU_INT);
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
+	pm_runtime_mark_last_busy(&pdev->dev);
+	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_RESUMED);
 
-	if (is_runtime)
-		pm_runtime_mark_last_busy(&pdev->dev);
-
-resume_complete:
-	iowrite32(L1_DISABLE_BIT(0), IREG_BASE(mtk_dev) + DIS_ASPM_LOWPWR_CLR_0);
-	atomic_inc(&mtk_dev->md_pm_resumed);
 	return ret;
 }
 
-static void mtk_pci_shutdown(struct pci_dev *pdev)
+static int t7xx_pci_pm_resume_noirq(struct device *dev)
 {
-	__mtk_pci_pm_suspend(pdev, false);
-}
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct t7xx_pci_dev *t7xx_dev;
 
-static int mtk_pcie_bar_init(struct mtk_pci_dev *mtk_dev)
-{
-	unsigned long res_0_start = pci_resource_start(mtk_dev->pdev, 0);
-	unsigned long res_0_len = pci_resource_len(mtk_dev->pdev, 0);
-	unsigned long res_2_start = pci_resource_start(mtk_dev->pdev, 2);
-	unsigned long res_2_len = pci_resource_len(mtk_dev->pdev, 2);
-	struct device *dev = &mtk_dev->pdev->dev;
-
-	/* Allocate BAR0 memory */
-	if (!devm_request_mem_region(dev, res_0_start, res_0_len,
-				     dev->driver->name)) {
-		dev_err(dev, "BAR0 already in use\n");
-		return -EBUSY;
-	}
-
-	IREG_BASE(mtk_dev) = devm_ioremap(dev, res_0_start, res_0_len);
-	if (!IREG_BASE(mtk_dev)) {
-		dev_err(dev, "error mapping memory for BAR0\n");
-		return -ENOMEM;
-	}
-
-	/* Allocate BAR2 memory */
-	if (!devm_request_mem_region(dev, res_2_start, res_2_len,
-				     dev->driver->name)) {
-		dev_err(dev, "BAR2 already in use\n");
-		return -EBUSY;
-	}
-
-	mtk_dev->base_addr.pcie_ext_reg_base = devm_ioremap(dev,
-							    res_2_start, res_2_len);
-	if (!mtk_dev->base_addr.pcie_ext_reg_base) {
-		dev_err(dev, "error mapping memory for BAR2\n");
-		return -ENOMEM;
-	}
+	t7xx_dev = pci_get_drvdata(pdev);
+	t7xx_pcie_mac_interrupts_dis(t7xx_dev);
 
 	return 0;
 }
 
-static int mtk_pci_pm_suspend(struct device *dev)
+static void t7xx_pci_shutdown(struct pci_dev *pdev)
 {
-	return __mtk_pci_pm_suspend(to_pci_dev(dev), false);
+	__t7xx_pci_pm_suspend(pdev);
 }
 
-static int mtk_pci_pm_resume(struct device *dev)
+static int t7xx_pci_pm_suspend(struct device *dev)
 {
-	return __mtk_pci_pm_resume(to_pci_dev(dev), true, false);
+	return __t7xx_pci_pm_suspend(to_pci_dev(dev));
 }
 
-static int mtk_pci_pm_thaw(struct device *dev)
+static int t7xx_pci_pm_resume(struct device *dev)
 {
-	return __mtk_pci_pm_resume(to_pci_dev(dev), false, false);
+	return __t7xx_pci_pm_resume(to_pci_dev(dev), true);
 }
 
-static int mtk_pci_pm_runtime_suspend(struct device *dev)
+static int t7xx_pci_pm_thaw(struct device *dev)
 {
-	return __mtk_pci_pm_suspend(to_pci_dev(dev), true);
+	return __t7xx_pci_pm_resume(to_pci_dev(dev), false);
 }
 
-static int mtk_pci_pm_runtime_resume(struct device *dev)
+static int t7xx_pci_pm_runtime_suspend(struct device *dev)
 {
-	return __mtk_pci_pm_resume(to_pci_dev(dev), true, true);
+	return __t7xx_pci_pm_suspend(to_pci_dev(dev));
 }
 
-static int mtk_pci_pm_runtime_idle(struct device *dev)
+static int t7xx_pci_pm_runtime_resume(struct device *dev)
 {
-	pm_schedule_suspend(dev, RT_IDLE_DELAY * MSEC_PER_SEC);
-
-	return -EBUSY;
+	return __t7xx_pci_pm_resume(to_pci_dev(dev), true);
 }
 
-static const struct dev_pm_ops mtk_pci_pm_ops = {
-	.suspend = mtk_pci_pm_suspend,
-	.resume = mtk_pci_pm_resume,
-	.freeze = mtk_pci_pm_suspend,
-	.thaw = mtk_pci_pm_thaw,
-	.poweroff = mtk_pci_pm_suspend,
-	.restore = mtk_pci_pm_resume,
-	SET_RUNTIME_PM_OPS(mtk_pci_pm_runtime_suspend, mtk_pci_pm_runtime_resume,
-			   mtk_pci_pm_runtime_idle)
+static const struct dev_pm_ops t7xx_pci_pm_ops = {
+	.suspend = t7xx_pci_pm_suspend,
+	.resume = t7xx_pci_pm_resume,
+	.resume_noirq = t7xx_pci_pm_resume_noirq,
+	.freeze = t7xx_pci_pm_suspend,
+	.thaw = t7xx_pci_pm_thaw,
+	.poweroff = t7xx_pci_pm_suspend,
+	.restore = t7xx_pci_pm_resume,
+	.restore_noirq = t7xx_pci_pm_resume_noirq,
+	.runtime_suspend = t7xx_pci_pm_runtime_suspend,
+	.runtime_resume = t7xx_pci_pm_runtime_resume
 };
 
-static inline void mtk_pci_infracfg_ao_calc(struct mtk_pci_dev *mtk_dev)
+static int t7xx_request_irq(struct pci_dev *pdev)
 {
-	mtk_dev->base_addr.infracfg_ao_base = mtk_dev->base_addr.pcie_ext_reg_base +
-					      INFRACFG_AO_DEV_CHIP -
-					      mtk_dev->base_addr.pcie_dev_reg_trsl_addr;
-}
+	struct t7xx_pci_dev *t7xx_dev;
+	int ret = 0, i;
 
-static void mtk_pci_bridge_configure(struct mtk_pci_dev *mtk_dev, struct pci_dev *pdev)
-{
-	struct pci_dev *bridge;
-	int dpc_cap;
-	u16 ctl;
+	t7xx_dev = pci_get_drvdata(pdev);
 
-	/* check hotplug capability */
-	bridge = pci_upstream_bridge(pdev);
-	if (!bridge) {
-		dev_err(&pdev->dev, "Bridge is not found\n");
-		return;
-	}
+	for (i = 0; i < EXT_INT_NUM; i++) {
+		const char *irq_descr;
+		int irq_vec;
 
-	/* disable dpc capability */
-	dpc_cap = pci_find_ext_capability(bridge, PCI_EXT_CAP_ID_DPC);
-	if (dpc_cap) {
-		pci_read_config_word(bridge, dpc_cap + PCI_EXP_DPC_CTL, &ctl);
-		ctl &= ~(PCI_EXP_DPC_CTL_INT_EN | 0x3);
-		pci_write_config_word(bridge, dpc_cap + PCI_EXP_DPC_CTL, ctl);
-	}
-}
+		if (!t7xx_dev->intr_handler[i])
+			continue;
 
-static void mtk_pci_configure_ltr(struct pci_dev *pdev)
-{
-#ifdef CONFIG_PCIEASPM
-	struct pci_dev *bridge;
-	u32 cap, ctl;
-
-	if (!pci_is_pcie(pdev))
-		return;
-
-	pcie_capability_read_dword(pdev, PCI_EXP_DEVCAP2, &cap);
-	if (!(cap & PCI_EXP_DEVCAP2_LTR))
-		return;
-
-	bridge = pci_upstream_bridge(pdev);
-	if (!bridge) {
-		dev_err(&pdev->dev, "Bridge is not found\n");
-		return;
-	}
-	/* re-configure bridge ltr to satisfy remove-rescan case */
-	if (bridge->ltr_path == 1) {
-		pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2, &ctl);
-		if (!(ctl & PCI_EXP_DEVCTL2_LTR_EN))
-			pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2,
-						 PCI_EXP_DEVCTL2_LTR_EN);
-	}
-
-	/* re-configure device ltr to satisfy remove-rescan case */
-	if (pdev->ltr_path == 1) {
-		pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL2,
-					   PCI_EXP_DEVCTL2_LTR_EN);
-		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
-					 PCI_EXP_DEVCTL2_LTR_EN);
-	}
-#endif
-}
-
-static int mtk_request_irq(struct pci_dev *pdev, int irq_count)
-{
-	struct mtk_pci_dev *mtk_dev = pci_get_drvdata(pdev);
-	int ret;
-	int i;
-
-	mtk_dev->msix_res = pci_isr_alloc_table(mtk_dev, irq_count);
-	if (!mtk_dev->msix_res)
-		return -ENOMEM;
-
-	for (i = 0; i < irq_count; i++) {
-		mtk_dev->msix_res[i].mtk_dev = mtk_dev;
-
-		mtk_dev->msix_res[i].irq = pci_irq_vector(pdev, i);
-		sprintf(mtk_dev->msix_res[i].irq_descr,
-			"%s_%d", pdev->driver->name, i);
-		ret = devm_request_irq(&pdev->dev, pci_irq_vector(pdev, i),
-				       mtk_dev->msix_res[i].isr,
-				       IRQF_SHARED,
-				       mtk_dev->msix_res[i].irq_descr,
-				       &mtk_dev->msix_res[i]);
-
-		if (ret) {
-			dev_err(&pdev->dev, "failed to request_irq %d: %d\n",
-				pci_irq_vector(pdev, i), ret);
-			return ret;
-		}
-	}
-
-	mtk_dev->irq_count = irq_count;
-
-	return 0;
-}
-
-static void mtk_free_irq(struct pci_dev *pdev)
-{
-	struct mtk_pci_dev *mtk_dev = pci_get_drvdata(pdev);
-	int i;
-
-	for (i = 0; i < mtk_dev->irq_count; i++) {
-		if (mtk_dev->msix_res[i].isr) {
-			mtk_dev->msix_res[i].irq = 0;
-			devm_free_irq(&pdev->dev,
-				      pci_irq_vector(pdev, i),
-				      &mtk_dev->msix_res[i]);
-		}
-	}
-	pci_free_irq_vectors(mtk_dev->pdev);
-
-	mtk_dev->irq_count = 0;
-}
-
-static int mtk_setup_msix(struct mtk_pci_dev *mtk_dev)
-{
-	int msix_count = MTK_IRQ_COUNT;
-	int ret;
-
-	do {
-		ret = pci_alloc_irq_vectors(mtk_dev->pdev,
-					    MTK_IRQ_MSIX_MIN_COUNT, msix_count, PCI_IRQ_MSIX);
-		if (ret <= 0) {
-			dev_err(&mtk_dev->pdev->dev,
-				"failed to allocate MSI-X entry, errno %d\n", ret);
-			return -ENOMEM;
-		}
-		if (ret == msix_count)
+		irq_descr = devm_kasprintf(&pdev->dev, GFP_KERNEL, "%s_%d",
+					   dev_driver_string(&pdev->dev), i);
+		if (!irq_descr) {
+			ret = -ENOMEM;
 			break;
-
-		/* Got less irq vectors than requested */
-		pci_free_irq_vectors(mtk_dev->pdev);
-		if (msix_count == 2) {
-			dev_err(&mtk_dev->pdev->dev,
-				"Could not allocate enough MSI-X entries\n");
-			return -ENOMEM;
 		}
-		msix_count = BIT(fls(ret) - 1);
-	} while (1);
 
-	ret = mtk_request_irq(mtk_dev->pdev, msix_count);
+		irq_vec = pci_irq_vector(pdev, i);
+		ret = request_threaded_irq(irq_vec, t7xx_dev->intr_handler[i],
+					   t7xx_dev->intr_thread[i], 0, irq_descr,
+					   t7xx_dev->callback_param[i]);
+		if (ret) {
+			dev_err(&pdev->dev, "Failed to request IRQ: %d\n", ret);
+			break;
+		}
+	}
+
 	if (ret) {
-		pci_free_irq_vectors(mtk_dev->pdev);
+		while (i--) {
+			if (!t7xx_dev->intr_handler[i])
+				continue;
+
+			free_irq(pci_irq_vector(pdev, i), t7xx_dev->callback_param[i]);
+		}
+	}
+
+	return ret;
+}
+
+static int t7xx_setup_msix(struct t7xx_pci_dev *t7xx_dev)
+{
+	struct pci_dev *pdev = t7xx_dev->pdev;
+	int ret;
+
+	/* Only using 6 interrupts, but HW-design requires power-of-2 IRQs allocation */
+	ret = pci_alloc_irq_vectors(pdev, EXT_INT_NUM, EXT_INT_NUM, PCI_IRQ_MSIX);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to allocate MSI-X entry: %d\n", ret);
 		return ret;
 	}
 
-	/* Set MSIX merge config */
-	mtk_msix_ctrl_cfg(IREG_BASE(mtk_dev), msix_count);
+	ret = t7xx_request_irq(pdev);
+	if (ret) {
+		pci_free_irq_vectors(pdev);
+		return ret;
+	}
+
+	t7xx_pcie_set_mac_msix_cfg(t7xx_dev, EXT_INT_NUM);
+	return 0;
+}
+
+static int t7xx_interrupt_init(struct t7xx_pci_dev *t7xx_dev)
+{
+	int ret, i;
+
+	if (!t7xx_dev->pdev->msix_cap)
+		return -EINVAL;
+
+	ret = t7xx_setup_msix(t7xx_dev);
+	if (ret)
+		return ret;
+
+	/* IPs enable interrupts when ready */
+	for (i = 0; i < EXT_INT_NUM; i++)
+		t7xx_pcie_mac_set_int(t7xx_dev, i);
 
 	return 0;
 }
 
-static int mtk_interrupt_init(struct mtk_pci_dev *mtk_dev)
+static void t7xx_pci_infracfg_ao_calc(struct t7xx_pci_dev *t7xx_dev)
 {
-	char strwqbdf[128];
-	int i;
-
-	sprintf(strwqbdf, MTK_PCI_WQ_DESCR "(bdf:%d-%x-%x)", mtk_dev->pdev->bus->number,
-		(mtk_dev->pdev->devfn) >> 12, (mtk_dev->pdev->devfn) & 0xfff);
-
-	mtk_dev->pcie_isr_wq = create_singlethread_workqueue(strwqbdf);
-	if (!mtk_dev->pcie_isr_wq) {
-		dev_err(&mtk_dev->pdev->dev, "Failed to create workqueue: %s\n", strwqbdf);
-		return -EINVAL;
-	}
-
-	INIT_WORK(&mtk_dev->service_task, pcie_isr_service_task);
-
-	if (mtk_dev->pdev->msix_cap && (mtk_setup_msix(mtk_dev) == 0)) {
-		/* let the IPs enable interrupts when they are ready */
-		for (i = EXT_INT_START; i < EXT_INT_START + END_EXT_INT; i++)
-			PCIE_MSIX_MSK_SET(IREG_BASE(mtk_dev), i);
-		return 0;
-	}
-
-	return -1;
+	t7xx_dev->base_addr.infracfg_ao_base = t7xx_dev->base_addr.pcie_ext_reg_base +
+					      INFRACFG_AO_DEV_CHIP -
+					      t7xx_dev->base_addr.pcie_dev_reg_trsl_addr;
 }
 
-static int mtk_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+static int t7xx_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	struct mtk_pci_dev *mtk_dev;
+	struct t7xx_pci_dev *t7xx_dev;
 	int ret;
 
-	mtk_dev = devm_kzalloc(&pdev->dev, sizeof(*mtk_dev), GFP_KERNEL);
-	if (!mtk_dev)
+	t7xx_dev = devm_kzalloc(&pdev->dev, sizeof(*t7xx_dev), GFP_KERNEL);
+	if (!t7xx_dev)
 		return -ENOMEM;
 
-	dev_set_drvdata(&pdev->dev, mtk_dev);
-	mtk_pci_bridge_configure(mtk_dev, pdev);
+	pci_set_drvdata(pdev, t7xx_dev);
+	t7xx_dev->pdev = pdev;
+
 	ret = pcim_enable_device(pdev);
 	if (ret)
 		return ret;
 
-	if (!pdev->irq) {
-		dev_err(&pdev->dev, "No irq\n");
-		return -EINVAL;
-	}
-
-	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
-	if (ret) {
-		dev_err(&pdev->dev, "Set DMA mask error %d\n", ret);
-		return ret;
-	}
-
-	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
-	if (ret) {
-		dev_err(&pdev->dev, "Set Coherent DMA mask error %d\n", ret);
-		return ret;
-	}
-
-	pdev->dma_mask = DMA_BIT_MASK(64);
-	mtk_dev->pdev = pdev;
-
-	ret = mtk_pcie_bar_init(mtk_dev);
-	if (ret)
-		return ret;
-
-	mtk_pci_pm_init(mtk_dev);
-	mtk_dev->pm_enabled = 1;
-
-	/* Disable the interrupt to avoid unexpected interrupts */
-	mtk_enable_disable_int(IREG_BASE(mtk_dev), false);
-
-	ret = mtk_interrupt_init(mtk_dev);
-	if (ret)
-		return ret;
-
-	/* Address translation table configuration */
-	mtk_atr_init(mtk_dev);
-	/* Initial infra ao base addr */
-	mtk_pci_infracfg_ao_calc(mtk_dev);
-	/* Initialize mhccif */
-	mhccif_init(mtk_dev);
-
-	ret = ccci_modem_init(mtk_dev);
-	if (ret) {
-		dev_err(&pdev->dev, "register ccci device fail\n");
-		goto err_irq;
-	}
-
-	/* MSIX should enable mhccif */
-	mtk_clear_set_int_type(mtk_dev, MHCCIF_INT, false);
-	/* Enable interrupt */
-	mtk_enable_disable_int(IREG_BASE(mtk_dev), true);
-	/* Enable PCIe bus master */
 	pci_set_master(pdev);
 
-	mtk_pci_configure_ltr(pdev);
+	ret = pcim_iomap_regions(pdev, BIT(T7XX_PCI_IREG_BASE) | BIT(T7XX_PCI_EREG_BASE),
+				 pci_name(pdev));
+	if (ret) {
+		dev_err(&pdev->dev, "Could not request BARs: %d\n", ret);
+		return -ENOMEM;
+	}
+
+	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret) {
+		dev_err(&pdev->dev, "Could not set PCI DMA mask: %d\n", ret);
+		return ret;
+	}
+
+	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret) {
+		dev_err(&pdev->dev, "Could not set consistent PCI DMA mask: %d\n", ret);
+		return ret;
+	}
+
+	IREG_BASE(t7xx_dev) = pcim_iomap_table(pdev)[T7XX_PCI_IREG_BASE];
+	t7xx_dev->base_addr.pcie_ext_reg_base = pcim_iomap_table(pdev)[T7XX_PCI_EREG_BASE];
+
+	ret = t7xx_pci_pm_init(t7xx_dev);
+	if (ret)
+		return ret;
+
+	t7xx_pcie_mac_atr_init(t7xx_dev);
+	t7xx_pci_infracfg_ao_calc(t7xx_dev);
+	t7xx_mhccif_init(t7xx_dev);
+
+	ret = t7xx_devlink_register(t7xx_dev);
+	if (ret)
+		return ret;
+
+	ret = t7xx_md_init(t7xx_dev);
+	if (ret)
+		goto err_devlink_unregister;
+
+	t7xx_pcie_mac_interrupts_dis(t7xx_dev);
+
+	ret = sysfs_create_group(&t7xx_dev->pdev->dev.kobj,
+				 &cold_reboot_attribute_group);
+	if (ret) {
+		t7xx_md_exit(t7xx_dev);
+		goto err_devlink_unregister;
+	}
+
+	ret = t7xx_interrupt_init(t7xx_dev);
+	if (ret) {
+		sysfs_remove_group(&t7xx_dev->pdev->dev.kobj,
+				   &cold_reboot_attribute_group);
+		t7xx_md_exit(t7xx_dev);
+		goto err_devlink_unregister;
+	}
+
+	t7xx_rescan_done();
+	t7xx_pcie_mac_set_int(t7xx_dev, MHCCIF_INT);
+	t7xx_pcie_mac_interrupts_en(t7xx_dev);
+	if (!t7xx_dev->hp_enable)
+		pci_ignore_hotplug(pdev);
+
 	return 0;
 
-err_irq:
-	mtk_free_irq(pdev);
-	destroy_workqueue(mtk_dev->pcie_isr_wq);
+err_devlink_unregister:
+	t7xx_devlink_unregister(t7xx_dev);
 	return ret;
 }
 
-static void mtk_pci_remove(struct pci_dev *pdev)
+static void t7xx_pci_remove(struct pci_dev *pdev)
 {
-	struct mtk_pci_dev *mtk_dev = pci_get_drvdata(pdev);
+	struct t7xx_pci_dev *t7xx_dev;
+	int i;
 
-	ccci_modem_exit(mtk_dev);
-	mtk_pci_pm_deinit(mtk_dev);
-	mtk_free_irq(pdev);
-	cancel_work_sync(&mtk_dev->service_task);
-	destroy_workqueue(mtk_dev->pcie_isr_wq);
-	mtk_dev->pcie_isr_wq = NULL;
-	pci_disable_device(pdev);
+	t7xx_dev = pci_get_drvdata(pdev);
+	t7xx_md_exit(t7xx_dev);
+	t7xx_devlink_unregister(t7xx_dev);
+
+	sysfs_remove_group(&t7xx_dev->pdev->dev.kobj,
+			   &cold_reboot_attribute_group);
+
+	for (i = 0; i < EXT_INT_NUM; i++) {
+		if (!t7xx_dev->intr_handler[i])
+			continue;
+
+		free_irq(pci_irq_vector(pdev, i), t7xx_dev->callback_param[i]);
+	}
+
+	pci_free_irq_vectors(t7xx_dev->pdev);
 }
 
-static struct pci_driver mtk_pci_driver = {
+static const struct pci_device_id t7xx_pci_table[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x4d75) },
+	{ }
+};
+MODULE_DEVICE_TABLE(pci, t7xx_pci_table);
+
+static struct pci_driver t7xx_pci_driver = {
 	.name = "mtk_t7xx",
-	.id_table = mtk_dev_ids,
-	.probe = mtk_pci_probe,
-	.remove = mtk_pci_remove,
-	.driver.pm = &mtk_pci_pm_ops,
-	.shutdown = mtk_pci_shutdown,
+	.id_table = t7xx_pci_table,
+	.probe = t7xx_pci_probe,
+	.remove = t7xx_pci_remove,
+	.driver.pm = &t7xx_pci_pm_ops,
+	.shutdown = t7xx_pci_shutdown,
 };
 
-static int __init mtk_pci_init(void)
+static int __init t7xx_pci_init(void)
 {
-	int retval = ccci_init();
+	int ret;
 
-	if (retval) {
-		pr_err("Failed to ccci init\n");
-		return retval;
+	t7xx_pci_dev_rescan();
+	ret = t7xx_rescan_init();
+	if (ret) {
+		pr_err("Failed to init t7xx rescan work\n");
+		return ret;
 	}
 
-	retval = pci_register_driver(&mtk_pci_driver);
-	if (retval) {
-		pr_err("Failed to register pci driver\n");
-		ccci_uninit();
+	return pci_register_driver(&t7xx_pci_driver);
+}
+module_init(t7xx_pci_init);
+
+static int t7xx_always_match(struct device *dev, const void *data)
+{
+	return 1;
+}
+
+static void __exit t7xx_pci_cleanup(void)
+{
+	int remove_flag = 0;
+	struct device *dev;
+
+	dev = driver_find_device(&t7xx_pci_driver.driver, NULL, NULL, t7xx_always_match);
+	if (dev) {
+		pr_debug("unregister t7xx PCIe driver while device is still exist.\n");
+		put_device(dev);
+		remove_flag = 1;
+	} else {
+		pr_debug("no t7xx PCIe driver found.\n");
 	}
 
-	return retval;
-}
-module_init(mtk_pci_init);
+	pci_lock_rescan_remove();
+	pci_unregister_driver(&t7xx_pci_driver);
+	pci_unlock_rescan_remove();
+	t7xx_rescan_deinit();
 
-static void __exit mtk_pci_cleanup(void)
-{
-	pci_unregister_driver(&mtk_pci_driver);
-	ccci_uninit();
+	if (remove_flag) {
+		pr_debug("remove t7xx PCI device\n");
+		pci_stop_and_remove_bus_device_locked(to_pci_dev(dev));
+	}
 }
-module_exit(mtk_pci_cleanup);
+
+module_exit(t7xx_pci_cleanup);
 
 MODULE_AUTHOR("MediaTek Inc");
-MODULE_DESCRIPTION("MediaTek PCIe 5G WWAN modem T7XX driver");
-MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("MediaTek PCIe 5G WWAN modem T7xx driver");
+MODULE_LICENSE("GPL");

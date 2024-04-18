@@ -133,7 +133,7 @@ static void buf_cleanup(struct vb2_buffer *vb)
 		__func__);
 
 	if (aq->buf_cleanup)
-		return aq->buf_cleanup(vb);
+		aq->buf_cleanup(vb);
 }
 
 /*
@@ -457,7 +457,6 @@ static int ipu_isys_stream_start(struct ipu_isys_pipeline *ip,
 					       buf, to_dma_addr(msg),
 					       sizeof(*buf),
 					       send_type);
-		ipu_put_fw_mgs_buf(pipe_av->isys, (uintptr_t)buf);
 	} while (!WARN_ON(rval));
 
 	return 0;
@@ -476,7 +475,7 @@ out_requeue:
 	return rval;
 }
 
-static void __buf_queue(struct vb2_buffer *vb, bool force)
+static void buf_queue(struct vb2_buffer *vb)
 {
 	struct ipu_isys_queue *aq = vb2_queue_to_ipu_isys_queue(vb->vb2_queue);
 	struct ipu_isys_video *av = ipu_isys_queue_to_video(aq);
@@ -519,7 +518,7 @@ static void __buf_queue(struct vb2_buffer *vb, bool force)
 	mutex_unlock(&av->mutex);
 	mutex_lock(&pipe_av->mutex);
 
-	if (!force && ip->nr_streaming != ip->nr_queues) {
+	if (ip->nr_streaming != ip->nr_queues) {
 		dev_dbg(&av->isys->adev->dev,
 			"not streaming yet, adding to incoming\n");
 		goto out;
@@ -578,18 +577,12 @@ static void __buf_queue(struct vb2_buffer *vb, bool force)
 				       buf, to_dma_addr(msg),
 				       sizeof(*buf),
 				       IPU_FW_ISYS_SEND_TYPE_STREAM_CAPTURE);
-	ipu_put_fw_mgs_buf(pipe_av->isys, (uintptr_t)buf);
 	if (!WARN_ON(rval < 0))
 		dev_dbg(&av->isys->adev->dev, "queued buffer\n");
 
 out:
 	mutex_unlock(&pipe_av->mutex);
 	mutex_lock(&av->mutex);
-}
-
-static void buf_queue(struct vb2_buffer *vb)
-{
-	__buf_queue(vb, false);
 }
 
 int ipu_isys_link_fmt_validate(struct ipu_isys_queue *aq)
@@ -872,7 +865,7 @@ static u64 get_sof_ns_delta(struct ipu_isys_video *av,
 	else
 		delta = 0;
 
-	return ipu_buttress_tsc_ticks_to_ns(delta);
+	return ipu_buttress_tsc_ticks_to_ns(delta, isp);
 }
 
 void

@@ -756,7 +756,6 @@ static const struct snd_soc_component_driver tas571x_component = {
 	.num_dapm_routes	= ARRAY_SIZE(tas571x_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static struct snd_soc_dai_driver tas571x_dai = {
@@ -773,7 +772,7 @@ static struct snd_soc_dai_driver tas571x_dai = {
 	.ops = &tas571x_dai_ops,
 };
 
-static const struct of_device_id tas571x_of_match[];
+static const struct of_device_id tas571x_of_match[] __maybe_unused;
 
 static int tas571x_i2c_probe(struct i2c_client *client,
 			     const struct i2c_device_id *id)
@@ -889,7 +888,7 @@ static int tas571x_i2c_remove(struct i2c_client *client)
 	return 0;
 }
 
-static const struct of_device_id tas571x_of_match[] = {
+static const struct of_device_id tas571x_of_match[] __maybe_unused = {
 	{ .compatible = "ti,tas5707", .data = &tas5707_chip, },
 	{ .compatible = "ti,tas5711", .data = &tas5711_chip, },
 	{ .compatible = "ti,tas5717", .data = &tas5717_chip, },

@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/reboot.h>
 #include <crypto/hash.h>
+#include <linux/string.h>
 
 #define DM_MSG_PREFIX			"verity"
 
@@ -83,6 +84,28 @@ int dm_verity_unregister_error_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(dm_verity_unregister_error_notifier);
 
+/*
+ * Make two different leaf functions to be able to separately query transient
+ * and non-transient verity failures in crash analysis tool.
+ */
+static noinline
+void verity_transient_error_panic(dev_t devt, blk_status_t status,
+				  u64 block, const char *message)
+{
+	panic("dm-verity transient failure: "
+	      "device:%u:%u status:%d block:%llu message:%s",
+	      MAJOR(devt), MINOR(devt), status, (u64)block, message);
+}
+
+static noinline
+void verity_integrity_error_panic(dev_t devt, blk_status_t status,
+				  u64 block, const char *message)
+{
+	panic("dm-verity integrity failure: "
+	      "device:%u:%u status:%d block:%llu message:%s",
+	      MAJOR(devt), MINOR(devt), status, (u64)block, message);
+}
+
 /* If the request is not successful, this handler takes action.
  * TODO make this call a registered handler.
  */
@@ -138,9 +161,10 @@ static void verity_error(struct dm_verity *v, struct dm_verity_io *io,
 	return;
 
 do_panic:
-	panic("dm-verity failure: "
-	      "device:%u:%u status:%d block:%llu message:%s",
-	      MAJOR(devt), MINOR(devt), status, (u64)block, message);
+	if (transient)
+		verity_transient_error_panic(devt, status, block, message);
+	else
+		verity_integrity_error_panic(devt, status, block, message);
 }
 
 /**
@@ -371,12 +395,8 @@ out:
 	if (v->mode == DM_VERITY_MODE_LOGGING)
 		return 0;
 
-	if (v->mode == DM_VERITY_MODE_RESTART) {
-#ifdef CONFIG_DM_VERITY_AVB
-		dm_verity_avb_error_handler();
-#endif
+	if (v->mode == DM_VERITY_MODE_RESTART)
 		kernel_restart("dm-verity device corrupted");
-	}
 
 	if (v->mode == DM_VERITY_MODE_PANIC)
 		panic("dm-verity device corrupted");
@@ -598,13 +618,14 @@ static int verity_verify_io(struct dm_verity_io *io)
 	struct bvec_iter start;
 	unsigned b;
 	struct crypto_wait wait;
+	struct bio *bio = dm_bio_from_per_bio_data(io, v->ti->per_io_data_size);
 
 	for (b = 0; b < io->n_blocks; b++) {
 		int r;
 		sector_t cur_block = io->block + b;
 		struct ahash_request *req = verity_io_hash_req(v, io);
 
-		if (v->validated_blocks &&
+		if (v->validated_blocks && bio->bi_status == BLK_STS_OK &&
 		    likely(test_bit(cur_block, v->validated_blocks))) {
 			verity_bv_skip_block(v, io, &io->iter);
 			continue;
@@ -652,9 +673,17 @@ static int verity_verify_io(struct dm_verity_io *io)
 		else if (verity_fec_decode(v, io, DM_VERITY_BLOCK_TYPE_DATA,
 					   cur_block, NULL, &start) == 0)
 			continue;
-		else if (verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA,
-					   cur_block))
-			return -EIO;
+		else {
+			if (bio->bi_status) {
+				/*
+				 * Error correction failed; Just return error
+				 */
+				return -EIO;
+			}
+			if (verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA,
+					      cur_block))
+				return -EIO;
+		}
 	}
 
 	return 0;
@@ -897,6 +926,49 @@ static void verity_status(struct dm_target *ti, status_type_t type,
 			DMEMIT(" " DM_VERITY_ROOT_HASH_VERIFICATION_OPT_SIG_KEY
 				" %s", v->signature_key_desc);
 		break;
+
+	case STATUSTYPE_IMA:
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		DMEMIT(",hash_failed=%c", v->hash_failed ? 'C' : 'V');
+		DMEMIT(",verity_version=%u", v->version);
+		DMEMIT(",data_device_name=%s", v->data_dev->name);
+		DMEMIT(",hash_device_name=%s", v->hash_dev->name);
+		DMEMIT(",verity_algorithm=%s", v->alg_name);
+
+		DMEMIT(",root_digest=");
+		for (x = 0; x < v->digest_size; x++)
+			DMEMIT("%02x", v->root_digest[x]);
+
+		DMEMIT(",salt=");
+		if (!v->salt_size)
+			DMEMIT("-");
+		else
+			for (x = 0; x < v->salt_size; x++)
+				DMEMIT("%02x", v->salt[x]);
+
+		DMEMIT(",ignore_zero_blocks=%c", v->zero_digest ? 'y' : 'n');
+		DMEMIT(",check_at_most_once=%c", v->validated_blocks ? 'y' : 'n');
+		if (v->signature_key_desc)
+			DMEMIT(",root_hash_sig_key_desc=%s", v->signature_key_desc);
+
+		if (v->mode != DM_VERITY_MODE_EIO) {
+			DMEMIT(",verity_mode=");
+			switch (v->mode) {
+			case DM_VERITY_MODE_LOGGING:
+				DMEMIT(DM_VERITY_OPT_LOGGING);
+				break;
+			case DM_VERITY_MODE_RESTART:
+				DMEMIT(DM_VERITY_OPT_RESTART);
+				break;
+			case DM_VERITY_MODE_PANIC:
+				DMEMIT(DM_VERITY_OPT_PANIC);
+				break;
+			default:
+				DMEMIT("invalid");
+			}
+		}
+		DMEMIT(";");
+		break;
 	}
 }
 
@@ -1018,6 +1090,28 @@ out:
 	return r;
 }
 
+static inline bool verity_is_verity_mode(const char *arg_name)
+{
+	return (!strcasecmp(arg_name, DM_VERITY_OPT_LOGGING) ||
+		!strcasecmp(arg_name, DM_VERITY_OPT_RESTART) ||
+		!strcasecmp(arg_name, DM_VERITY_OPT_PANIC));
+}
+
+static int verity_parse_verity_mode(struct dm_verity *v, const char *arg_name)
+{
+	if (v->mode)
+		return -EINVAL;
+
+	if (!strcasecmp(arg_name, DM_VERITY_OPT_LOGGING))
+		v->mode = DM_VERITY_MODE_LOGGING;
+	else if (!strcasecmp(arg_name, DM_VERITY_OPT_RESTART))
+		v->mode = DM_VERITY_MODE_RESTART;
+	else if (!strcasecmp(arg_name, DM_VERITY_OPT_PANIC))
+		v->mode = DM_VERITY_MODE_PANIC;
+
+	return 0;
+}
+
 static int verity_parse_opt_args(struct dm_arg_set *as, struct dm_verity *v,
 				 struct dm_verity_sig_opts *verify_args)
 {
@@ -1041,16 +1135,12 @@ static int verity_parse_opt_args(struct dm_arg_set *as, struct dm_verity *v,
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!strcasecmp(arg_name, DM_VERITY_OPT_LOGGING)) {
-			v->mode = DM_VERITY_MODE_LOGGING;
-			continue;
-
-		} else if (!strcasecmp(arg_name, DM_VERITY_OPT_RESTART)) {
-			v->mode = DM_VERITY_MODE_RESTART;
-			continue;
-
-		} else if (!strcasecmp(arg_name, DM_VERITY_OPT_PANIC)) {
-			v->mode = DM_VERITY_MODE_PANIC;
+		if (verity_is_verity_mode(arg_name)) {
+			r = verity_parse_verity_mode(v, arg_name);
+			if (r) {
+				ti->error = "Conflicting error handling parameters";
+				return r;
+			}
 			continue;
 
 		} else if (!strcasecmp(arg_name, DM_VERITY_OPT_IGN_ZEROES)) {
@@ -1119,8 +1209,10 @@ static int verity_get_device(struct dm_target *ti, const char *devname,
 		if (!dev_wait)
 			break;
 
-		/* No need to be too aggressive since this is a slow path. */
-		msleep(500);
+		/* This delay directly affects boot time if code reaches here.
+		 * So keep it small.
+		 */
+		msleep(5);
 	} while (dev_wait && (driver_probe_done() != 0 || *dm_dev == NULL));
 	return -1;
 }
@@ -1139,7 +1231,7 @@ static char *chromeos_args(unsigned *pargc, char ***pargv)
 	char **argv = *pargv;
 	int argc = *pargc;
 	char *key, *val;
-	int nargc = 10;
+	int nargc = 13;
 	char **nargv;
 	char *errstr;
 	int i;
@@ -1152,6 +1244,9 @@ static char *chromeos_args(unsigned *pargc, char ***pargv)
 	nargv[3] = "4096";	/* hash block size */
 	nargv[4] = "4096";	/* data block size */
 	nargv[9] = "-";		/* salt (optional) */
+	nargv[10] = "2";
+	nargv[11] = DM_VERITY_OPT_ERROR_BEHAVIOR;
+	nargv[12] = verity_parse_error_behavior(error_behavior);
 
 	for (i = 0; i < argc; ++i) {
 		DMDEBUG("Argument %d: '%s'", i, argv[i]);
@@ -1195,19 +1290,17 @@ static char *chromeos_args(unsigned *pargc, char ***pargv)
 		} else if (!strcmp(key, DM_VERITY_OPT_ERROR_BEHAVIOR)) {
 			char *behavior = verity_parse_error_behavior(val);
 
-			if (IS_ERR(behavior)) {
-				errstr = "Invalid error behavior";
-				goto err;
-			}
-			nargv[10] = "2";
-			nargv[11] = key;
 			nargv[12] = behavior;
-			nargc = 13;
 		}
 	}
 
 	if (!nargv[1] || !nargv[2] || !nargv[5] || !nargv[7] || !nargv[8]) {
 		errstr = "Missing argument";
+		goto err;
+	}
+
+	if (IS_ERR(nargv[12])) {
+		errstr = "Invalid error behavior";
 		goto err;
 	}
 
@@ -1516,9 +1609,56 @@ bad:
 	return r;
 }
 
+/*
+ * Check whether a DM target is a verity target.
+ */
+bool dm_is_verity_target(struct dm_target *ti)
+{
+	return ti->type->module == THIS_MODULE;
+}
+
+/*
+ * Get the verity mode (error behavior) of a verity target.
+ *
+ * Returns the verity mode of the target, or -EINVAL if 'ti' is not a verity
+ * target.
+ */
+int dm_verity_get_mode(struct dm_target *ti)
+{
+	struct dm_verity *v = ti->private;
+
+	if (!dm_is_verity_target(ti))
+		return -EINVAL;
+
+	return v->mode;
+}
+
+/*
+ * Get the root digest of a verity target.
+ *
+ * Returns a copy of the root digest, the caller is responsible for
+ * freeing the memory of the digest.
+ */
+int dm_verity_get_root_digest(struct dm_target *ti, u8 **root_digest, unsigned int *digest_size)
+{
+	struct dm_verity *v = ti->private;
+
+	if (!dm_is_verity_target(ti))
+		return -EINVAL;
+
+	*root_digest = kmemdup(v->root_digest, v->digest_size, GFP_KERNEL);
+	if (*root_digest == NULL)
+		return -ENOMEM;
+
+	*digest_size = v->digest_size;
+
+	return 0;
+}
+
 static struct target_type verity_target = {
 	.name		= "verity",
-	.version	= {1, 7, 0},
+	.features	= DM_TARGET_IMMUTABLE,
+	.version	= {1, 8, 1},
 	.module		= THIS_MODULE,
 	.ctr		= verity_ctr,
 	.dtr		= verity_dtr,

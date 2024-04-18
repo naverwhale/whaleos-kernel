@@ -46,18 +46,17 @@ Contents:
    cdc_mbim
    dccp
    dctcp
-   decnet
    dns_resolver
    driver
    eql
    fib_trie
    filter
-   framerelay
    generic-hdlc
    generic_netlink
    gen_stats
    gtp
    ila
+   ioam6-sysctl
    ipddp
    ip_dynaddr
    ipsec
@@ -69,13 +68,16 @@ Contents:
    l2tp
    lapb-module
    mac80211-injection
+   mctp
    mpls-sysctl
+   mptcp-sysctl
    multiqueue
    netconsole
    netdev-features
    netdevices
    netfilter-sysctl
    netif-msg
+   nexthop-group-resilient
    nf_conntrack-sysctl
    nf_flowtable
    openvswitch
@@ -101,6 +103,7 @@ Contents:
    tcp-thin
    team
    timestamping
+   tipc
    tproxy
    tuntap
    udplite

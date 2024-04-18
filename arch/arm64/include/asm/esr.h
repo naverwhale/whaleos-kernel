@@ -68,6 +68,7 @@
 #define ESR_ELx_EC_MAX		(0x3F)
 
 #define ESR_ELx_EC_SHIFT	(26)
+#define ESR_ELx_EC_WIDTH	(6)
 #define ESR_ELx_EC_MASK		(UL(0x3F) << ESR_ELx_EC_SHIFT)
 #define ESR_ELx_EC(esr)		(((esr) & ESR_ELx_EC_MASK) >> ESR_ELx_EC_SHIFT)
 
@@ -106,6 +107,7 @@
 #define ESR_ELx_FSC_TYPE	(0x3C)
 #define ESR_ELx_FSC_LEVEL	(0x03)
 #define ESR_ELx_FSC_EXTABT	(0x10)
+#define ESR_ELx_FSC_MTE		(0x11)
 #define ESR_ELx_FSC_SERROR	(0x11)
 #define ESR_ELx_FSC_ACCESS	(0x08)
 #define ESR_ELx_FSC_FAULT	(0x04)
@@ -322,14 +324,14 @@
 #ifndef __ASSEMBLY__
 #include <asm/types.h>
 
-static inline bool esr_is_data_abort(u32 esr)
+static inline bool esr_is_data_abort(unsigned long esr)
 {
-	const u32 ec = ESR_ELx_EC(esr);
+	const unsigned long ec = ESR_ELx_EC(esr);
 
 	return ec == ESR_ELx_EC_DABT_LOW || ec == ESR_ELx_EC_DABT_CUR;
 }
 
-const char *esr_get_class_string(u32 esr);
+const char *esr_get_class_string(unsigned long esr);
 #endif /* __ASSEMBLY */
 
 #endif /* __ASM_ESR_H */

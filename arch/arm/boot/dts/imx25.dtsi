@@ -515,7 +515,7 @@
 				#interrupt-cells = <2>;
 			};
 
-			sdma: sdma@53fd4000 {
+			sdma: dma-controller@53fd4000 {
 				compatible = "fsl,imx25-sdma";
 				reg = <0x53fd4000 0x4000>;
 				clocks = <&clks 112>, <&clks 68>;
@@ -525,7 +525,7 @@
 				fsl,sdma-ram-script-name = "imx/sdma/sdma-imx25.bin";
 			};
 
-			wdog@53fdc000 {
+			watchdog@53fdc000 {
 				compatible = "fsl,imx25-wdt", "fsl,imx21-wdt";
 				reg = <0x53fdc000 0x4000>;
 				clocks = <&clks 126>;

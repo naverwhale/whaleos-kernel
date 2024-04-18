@@ -28,12 +28,15 @@
 
 struct hantro_ctx;
 struct hantro_codec_ops;
+struct hantro_postproc_ops;
 
 #define HANTRO_JPEG_ENCODER	BIT(0)
 #define HANTRO_ENCODERS		0x0000ffff
 #define HANTRO_MPEG2_DECODER	BIT(16)
 #define HANTRO_VP8_DECODER	BIT(17)
 #define HANTRO_H264_DECODER	BIT(18)
+#define HANTRO_HEVC_DECODER	BIT(19)
+#define HANTRO_VP9_DECODER	BIT(20)
 #define HANTRO_DECODERS		0xffff0000
 
 /**
@@ -58,17 +61,17 @@ struct hantro_irq {
  * @num_dec_fmts:		Number of decoder formats.
  * @postproc_fmts:		Post-processor formats.
  * @num_postproc_fmts:		Number of post-processor formats.
+ * @postproc_ops:		Post-processor ops.
  * @codec:			Supported codecs
  * @codec_ops:			Codec ops.
- * @init:			Initialize hardware.
- * @runtime_resume:		reenable hardware after power gating
+ * @init:			Initialize hardware, optional.
+ * @runtime_resume:		reenable hardware after power gating, optional.
  * @irqs:			array of irq names and interrupt handlers
  * @num_irqs:			number of irqs in the array
  * @clk_names:			array of clock names
  * @num_clocks:			number of clocks in the array
  * @reg_names:			array of register range names
  * @num_regs:			number of register range names in the array
- * @postproc_regs:		&struct hantro_postproc_regs pointer
  */
 struct hantro_variant {
 	unsigned int enc_offset;
@@ -79,6 +82,7 @@ struct hantro_variant {
 	unsigned int num_dec_fmts;
 	const struct hantro_fmt *postproc_fmts;
 	unsigned int num_postproc_fmts;
+	const struct hantro_postproc_ops *postproc_ops;
 	unsigned int codec;
 	const struct hantro_codec_ops *codec_ops;
 	int (*init)(struct hantro_dev *vpu);
@@ -89,7 +93,6 @@ struct hantro_variant {
 	int num_clocks;
 	const char * const *reg_names;
 	int num_regs;
-	const struct hantro_postproc_regs *postproc_regs;
 };
 
 /**
@@ -99,6 +102,8 @@ struct hantro_variant {
  * @HANTRO_MODE_H264_DEC: H264 decoder.
  * @HANTRO_MODE_MPEG2_DEC: MPEG-2 decoder.
  * @HANTRO_MODE_VP8_DEC: VP8 decoder.
+ * @HANTRO_MODE_HEVC_DEC: HEVC decoder.
+ * @HANTRO_MODE_VP9_DEC: VP9 decoder.
  */
 enum hantro_codec_mode {
 	HANTRO_MODE_NONE = -1,
@@ -106,6 +111,8 @@ enum hantro_codec_mode {
 	HANTRO_MODE_H264_DEC,
 	HANTRO_MODE_MPEG2_DEC,
 	HANTRO_MODE_VP8_DEC,
+	HANTRO_MODE_HEVC_DEC,
+	HANTRO_MODE_VP9_DEC,
 };
 
 /*
@@ -214,9 +221,12 @@ struct hantro_dev {
  *
  * @codec_ops:		Set of operations related to codec mode.
  * @postproc:		Post-processing context.
+ * @h264_dec:		H.264-decoding context.
  * @jpeg_enc:		JPEG-encoding context.
  * @mpeg2_dec:		MPEG-2-decoding context.
  * @vp8_dec:		VP8-decoding context.
+ * @hevc_dec:		HEVC-decoding context.
+ * @vp9_dec:		VP9-decoding context.
  */
 struct hantro_ctx {
 	struct hantro_dev *dev;
@@ -243,6 +253,8 @@ struct hantro_ctx {
 		struct hantro_jpeg_enc_hw_ctx jpeg_enc;
 		struct hantro_mpeg2_dec_hw_ctx mpeg2_dec;
 		struct hantro_vp8_dec_hw_ctx vp8_dec;
+		struct hantro_hevc_dec_hw_ctx hevc_dec;
+		struct hantro_vp9_dec_hw_ctx vp9_dec;
 	};
 };
 
@@ -256,6 +268,7 @@ struct hantro_ctx {
  * @max_depth:	Maximum depth, for bitstream formats
  * @enc_fmt:	Format identifier for encoder registers.
  * @frmsize:	Supported range of frame sizes (only for bitstream formats).
+ * @postprocessed: Indicates if this format needs the post-processor.
  */
 struct hantro_fmt {
 	char *name;
@@ -265,6 +278,7 @@ struct hantro_fmt {
 	int max_depth;
 	enum hantro_enc_fmt enc_fmt;
 	struct v4l2_frmsize_stepwise frmsize;
+	bool postprocessed;
 };
 
 struct hantro_reg {
@@ -290,10 +304,26 @@ struct hantro_postproc_regs {
 	struct hantro_reg display_width;
 };
 
+struct hantro_vp9_decoded_buffer_info {
+	/* Info needed when the decoded frame serves as a reference frame. */
+	unsigned short width;
+	unsigned short height;
+	u32 bit_depth : 4;
+};
+
+struct hantro_decoded_buffer {
+	/* Must be the first field in this struct. */
+	struct v4l2_m2m_buffer base;
+
+	union {
+		struct hantro_vp9_decoded_buffer_info vp9;
+	};
+};
+
 /* Logging helpers */
 
 /**
- * debug - Module parameter to control level of debugging messages.
+ * DOC: hantro_debug: Module parameter to control level of debugging messages.
  *
  * Level of debugging messages can be controlled by bits of
  * module parameter called "debug". Meaning of particular
@@ -360,6 +390,13 @@ static inline void vdpu_write(struct hantro_dev *vpu, u32 val, u32 reg)
 	writel(val, vpu->dec_base + reg);
 }
 
+static inline void hantro_write_addr(struct hantro_dev *vpu,
+				     unsigned long offset,
+				     dma_addr_t addr)
+{
+	vdpu_write(vpu, addr & 0xffffffff, offset);
+}
+
 static inline u32 vdpu_read(struct hantro_dev *vpu, u32 reg)
 {
 	u32 val = readl(vpu->dec_base + reg);
@@ -409,12 +446,8 @@ hantro_get_dst_buf(struct hantro_ctx *ctx)
 	return v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 }
 
-static inline bool
-hantro_needs_postproc(const struct hantro_ctx *ctx,
-		      const struct hantro_fmt *fmt)
-{
-	return !ctx->is_encoder && fmt->fourcc != V4L2_PIX_FMT_NV12;
-}
+bool hantro_needs_postproc(const struct hantro_ctx *ctx,
+			   const struct hantro_fmt *fmt);
 
 static inline dma_addr_t
 hantro_get_dec_buf_addr(struct hantro_ctx *ctx, struct vb2_buffer *vb)
@@ -422,6 +455,12 @@ hantro_get_dec_buf_addr(struct hantro_ctx *ctx, struct vb2_buffer *vb)
 	if (hantro_needs_postproc(ctx, ctx->vpu_dst_fmt))
 		return ctx->postproc.dec_q[vb->index].dma;
 	return vb2_dma_contig_plane_dma_addr(vb, 0);
+}
+
+static inline struct hantro_decoded_buffer *
+vb2_to_hantro_decoded_buf(struct vb2_buffer *buf)
+{
+	return container_of(buf, struct hantro_decoded_buffer, base.vb.vb2_buf);
 }
 
 void hantro_postproc_disable(struct hantro_ctx *ctx);

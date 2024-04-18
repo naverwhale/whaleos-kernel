@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2014, 2018-2020 Intel Corporation
+ * Copyright (C) 2005-2014, 2018-2023 Intel Corporation
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_xvt_h__
@@ -36,8 +36,9 @@ enum iwl_xvt_state {
 #define IWL_XVT_INVALID_STA 0xFF
 
 /**
- * tx_meta_data - Holds data and member needed for tx
+ * struct tx_meta_data - Holds data and member needed for tx
  * @tx_mod_thread: thread dedicated for tx traffic
+ * @tx_mod_thread_completion: thread completion
  * @mod_tx_wq: send packets queue
  * @tx_task_operating: whether tx is active
  * @queue: FW queue ID for TX_CMD
@@ -46,9 +47,11 @@ enum iwl_xvt_state {
  * @mod_tx_done_wq: queue to wait on until all packets are sent and received
  * @txq_full: set to true when mod_tx_wq is full
  * @seq_num: sequence number of qos frames (per-tid)
+ * @sta_msk: station id mask
  */
 struct tx_meta_data {
 	struct task_struct *tx_mod_thread;
+	struct completion tx_mod_thread_completion;
 	wait_queue_head_t mod_tx_wq;
 	bool tx_task_operating;
 	int queue;
@@ -57,6 +60,7 @@ struct tx_meta_data {
 	wait_queue_head_t mod_tx_done_wq;
 	bool txq_full;
 	u16 seq_num[IWL_MAX_TID_COUNT];
+	u32 sta_msk;
 };
 
 /*
@@ -109,21 +113,25 @@ struct iwl_xvt_reorder_buffer {
 };
 
 /**
- * tx_queue_data - Holds tx data per tx queue
+ * struct tx_queue_data - Holds tx data per tx queue
  * @tx_wq: TX sw queue
  * @tx_counter: Number of packets that were sent from this queue. Counts TX_RSP
  * @txq_full: Set to true when tx_wq is full
  * @allocated_queue: Whether queue is allocated
+ * @sta_mask: Station id mask
+ * @tid: TID
  */
 struct tx_queue_data {
 	wait_queue_head_t tx_wq;
 	u64 tx_counter;
 	bool txq_full;
 	bool allocated_queue;
+	u32 sta_mask;
+	u16 tid;
 };
 
 /**
- * tx_payload - Holds tx payload
+ * struct tx_payload - Holds tx payload
  * @length: Payload length in bytes
  * @payload: Payload buffer
  */
@@ -133,8 +141,10 @@ struct tx_payload {
 };
 
 /**
- * iwl_sw_stack_config - Holds active SW stack config as set from user space
+ * struct iwl_sw_stack_config - Holds active SW stack config as set from user space
  * @load_mask: Which FW are to be loaded during SW stack up
+ * @calib_override_mask: calibrations override mask
+ * @fw_dbg_flags: fw debug flags
  * @fw_calib_cmd_cfg: Which calibrations should be done
  */
 struct iwl_sw_stack_config {
@@ -143,65 +153,6 @@ struct iwl_sw_stack_config {
 	u32 fw_dbg_flags;
 	struct iwl_phy_cfg_cmd_v3 fw_calib_cmd_cfg[IWL_UCODE_TYPE_MAX];
 };
-
-/* Note: This structure is read from the device with IO accesses,
- * and the reading already does the endian conversion. As it is
- * read with u32-sized accesses, any members with a different size
- * need to be ordered correctly though!
- */
-struct iwl_error_event_table_v1 {
-	u32 valid;		/* (nonzero) valid, (0) log is empty */
-	u32 error_id;		/* type of error */
-	u32 pc;			/* program counter */
-	u32 blink1;		/* branch link */
-	u32 blink2;		/* branch link */
-	u32 ilink1;		/* interrupt link */
-	u32 ilink2;		/* interrupt link */
-	u32 data1;		/* error-specific data */
-	u32 data2;		/* error-specific data */
-	u32 data3;		/* error-specific data */
-	u32 bcon_time;		/* beacon timer */
-	u32 tsf_low;		/* network timestamp function timer */
-	u32 tsf_hi;		/* network timestamp function timer */
-	u32 gp1;		/* GP1 timer register */
-	u32 gp2;		/* GP2 timer register */
-	u32 gp3;		/* GP3 timer register */
-	u32 ucode_ver;		/* uCode version */
-	u32 hw_ver;		/* HW Silicon version */
-	u32 brd_ver;		/* HW board version */
-	u32 log_pc;		/* log program counter */
-	u32 frame_ptr;		/* frame pointer */
-	u32 stack_ptr;		/* stack pointer */
-	u32 hcmd;		/* last host command header */
-	u32 isr0;		/* isr status register LMPM_NIC_ISR0:
-				 * rxtx_flag
-				 */
-	u32 isr1;		/* isr status register LMPM_NIC_ISR1:
-				 * host_flag
-				 */
-	u32 isr2;		/* isr status register LMPM_NIC_ISR2:
-				 * enc_flag
-				 */
-	u32 isr3;		/* isr status register LMPM_NIC_ISR3:
-				 * time_flag
-				 */
-	u32 isr4;		/* isr status register LMPM_NIC_ISR4:
-				 * wico interrupt
-				 */
-	u32 isr_pref;		/* isr status register LMPM_NIC_PREF_STAT */
-	u32 wait_event;		/* wait event() caller address */
-	u32 l2p_control;	/* L2pControlField */
-	u32 l2p_duration;	/* L2pDurationField */
-	u32 l2p_mhvalid;	/* L2pMhValidBits */
-	u32 l2p_addr_match;	/* L2pAddrMatchStat */
-	u32 lmpm_pmg_sel;	/* indicate which clocks are turned on
-				 * (LMPM_PMG_SEL)
-				 */
-	u32 u_timestamp;	/* indicate when the date and time of the
-				 * compilation
-				 */
-	u32 flow_handler;	/* FH read/write pointers, RX credit */
-} __packed;
 
 /* Note: This structure is read from the device with IO accesses,
  * and the reading already does the endian conversion. As it is
@@ -297,14 +248,6 @@ struct iwl_xvt_skb_info {
 	void *trans[2];
 };
 
-/**
- * struct iwl_xvt - the xvt op_mode
- *
- * @trans: pointer to the transport layer
- * @cfg: pointer to the driver's configuration
- * @fw: a pointer to the fw object
- * @dev: pointer to struct device for printing purposes
- */
 struct iwl_xvt {
 	struct iwl_trans *trans;
 	const struct iwl_cfg *cfg;
@@ -344,6 +287,7 @@ struct iwl_xvt {
 	/* members for enhanced tx command */
 	struct tx_payload *payloads[IWL_XVT_MAX_PAYLOADS_AMOUNT];
 	struct task_struct *tx_task;
+	struct completion tx_task_completion;
 	bool is_enhanced_tx;
 	bool send_tx_resp;
 	bool send_rx_mpdu;
@@ -367,10 +311,6 @@ int __must_check iwl_xvt_send_cmd_pdu(struct iwl_xvt *xvt, u32 id,
 				      u32 flags, u16 len, const void *data);
 
 /* Utils */
-void iwl_xvt_get_nic_error_log_v1(struct iwl_xvt *xvt,
-				  struct iwl_error_event_table_v1 *table);
-void iwl_xvt_dump_nic_error_log_v1(struct iwl_xvt *xvt,
-				   struct iwl_error_event_table_v1 *table);
 void iwl_xvt_get_nic_error_log_v2(struct iwl_xvt *xvt,
 				  struct iwl_error_event_table_v2 *table);
 void iwl_xvt_dump_nic_error_log_v2(struct iwl_xvt *xvt,
@@ -463,3 +403,6 @@ static inline int iwl_xvt_dbgfs_register(struct iwl_xvt *xvt,
 
 int iwl_xvt_init_sar_tables(struct iwl_xvt *xvt);
 int iwl_xvt_sar_select_profile(struct iwl_xvt *xvt, int prof_a, int prof_b);
+int iwl_xvt_init_ppag_tables(struct iwl_xvt *xvt);
+void iwl_xvt_txpath_flush_send_cmd(struct iwl_xvt *xvt, u32 sta_id, u16 tfd_msk);
+void iwl_xvt_lari_cfg(struct iwl_xvt *xvt);

@@ -39,6 +39,10 @@
 static asmlinkage long android_getpriority(struct pt_regs *regs);
 /* Android does not get to call keyctl. */
 static asmlinkage long android_keyctl(struct pt_regs *regs);
+#ifdef CONFIG_KCMP
+/* Android does not get to call kcmp with type==KCMP_SYSVEM. */
+static asmlinkage long android_kcmp(struct pt_regs *regs);
+#endif
 /* Make sure nothing sets a nice value more favorable than -10. */
 static asmlinkage long android_setpriority(struct pt_regs *regs);
 static asmlinkage long android_sched_setscheduler(struct pt_regs *regs);
@@ -53,7 +57,7 @@ static asmlinkage long android_compat_adjtimex(struct pt_regs *regs);
 static asmlinkage long android_compat_clock_adjtime(struct pt_regs *regs);
 #endif /* CONFIG_COMPAT */
 
-static struct syscall_whitelist_entry android_whitelist[] = {
+static const struct syscall_whitelist_entry android_whitelist[] __initconst = {
 	SYSCALL_ENTRY(accept),
 	SYSCALL_ENTRY(accept4),
 	SYSCALL_ENTRY_ALT(adjtimex, android_adjtimex),
@@ -125,7 +129,11 @@ static struct syscall_whitelist_entry android_whitelist[] = {
         SYSCALL_ENTRY(io_submit),
 	SYSCALL_ENTRY(ioprio_set),
         SYSCALL_ENTRY_ALT(keyctl, android_keyctl),
+#ifdef CONFIG_KCMP
+	SYSCALL_ENTRY_ALT(kcmp, android_kcmp),
+#else
 	SYSCALL_ENTRY(kcmp),
+#endif
 	SYSCALL_ENTRY(kill),
 	SYSCALL_ENTRY(lgetxattr),
 	SYSCALL_ENTRY(linkat),
@@ -136,6 +144,7 @@ static struct syscall_whitelist_entry android_whitelist[] = {
 	SYSCALL_ENTRY(lseek),
 	SYSCALL_ENTRY(lsetxattr),
 	SYSCALL_ENTRY(madvise),
+	SYSCALL_ENTRY(membarrier),
         SYSCALL_ENTRY(memfd_create),
 	SYSCALL_ENTRY(mincore),
 	SYSCALL_ENTRY(mkdirat),
@@ -177,6 +186,7 @@ static struct syscall_whitelist_entry android_whitelist[] = {
 	SYSCALL_ENTRY(remap_file_pages),
 	SYSCALL_ENTRY(removexattr),
 	SYSCALL_ENTRY(renameat),
+	SYSCALL_ENTRY(renameat2),
 	SYSCALL_ENTRY(restart_syscall),
 	SYSCALL_ENTRY(rt_sigaction),
 	SYSCALL_ENTRY(rt_sigpending),
@@ -326,7 +336,7 @@ static struct syscall_whitelist_entry android_whitelist[] = {
 }; /* end android_whitelist */
 
 #ifdef CONFIG_COMPAT
-static struct syscall_whitelist_entry android_compat_whitelist[] = {
+static const struct syscall_whitelist_entry android_compat_whitelist[] __initconst = {
 	COMPAT_SYSCALL_ENTRY(access),
 	COMPAT_SYSCALL_ENTRY_ALT(adjtimex, android_compat_adjtimex),
 	COMPAT_SYSCALL_ENTRY(brk),
@@ -401,7 +411,11 @@ static struct syscall_whitelist_entry android_compat_whitelist[] = {
         COMPAT_SYSCALL_ENTRY(io_submit),
 	COMPAT_SYSCALL_ENTRY(ioprio_set),
         COMPAT_SYSCALL_ENTRY_ALT(keyctl, android_keyctl),
+#ifdef CONFIG_KCMP
+	COMPAT_SYSCALL_ENTRY_ALT(kcmp, android_kcmp),
+#else
 	COMPAT_SYSCALL_ENTRY(kcmp),
+#endif
 	COMPAT_SYSCALL_ENTRY(kill),
 	COMPAT_SYSCALL_ENTRY(lgetxattr),
 	COMPAT_SYSCALL_ENTRY(link),
@@ -413,6 +427,7 @@ static struct syscall_whitelist_entry android_compat_whitelist[] = {
 	COMPAT_SYSCALL_ENTRY(lsetxattr),
 	COMPAT_SYSCALL_ENTRY(lstat),
 	COMPAT_SYSCALL_ENTRY(madvise),
+	COMPAT_SYSCALL_ENTRY(membarrier),
         COMPAT_SYSCALL_ENTRY(memfd_create),
 	COMPAT_SYSCALL_ENTRY(mincore),
 	COMPAT_SYSCALL_ENTRY(mkdir),
@@ -459,6 +474,7 @@ static struct syscall_whitelist_entry android_compat_whitelist[] = {
 	COMPAT_SYSCALL_ENTRY(removexattr),
 	COMPAT_SYSCALL_ENTRY(rename),
 	COMPAT_SYSCALL_ENTRY(renameat),
+	COMPAT_SYSCALL_ENTRY(renameat2),
 	COMPAT_SYSCALL_ENTRY(restart_syscall),
 	COMPAT_SYSCALL_ENTRY(rmdir),
 	COMPAT_SYSCALL_ENTRY(rt_sigaction),

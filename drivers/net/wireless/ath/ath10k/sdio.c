@@ -1248,7 +1248,7 @@ static int ath10k_sdio_bmi_exchange_msg(struct ath10k *ar,
 	 *        Wait for first 4 bytes to be in FIFO
 	 *        If CONSERVATIVE_BMI_READ is enabled, also wait for
 	 *        a BMI command credit, which indicates that the ENTIRE
-	 *        response is available in the the FIFO
+	 *        response is available in the FIFO
 	 *
 	 *  CASE 3: length > 128
 	 *        Wait for the first 4 bytes to be in FIFO
@@ -1363,8 +1363,11 @@ static void ath10k_rx_indication_async_work(struct work_struct *work)
 		ep->ep_ops.ep_rx_complete(ar, skb);
 	}
 
-	if (test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
+	if (test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags)) {
+		local_bh_disable();
 		napi_schedule(&ar->napi);
+		local_bh_enable();
+	}
 }
 
 static int ath10k_sdio_read_rtc_state(struct ath10k_sdio *ar_sdio, unsigned char *state)
@@ -2236,7 +2239,7 @@ static bool ath10k_sdio_is_fast_dump_supported(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_SDIO, "sdio hi_option_flag2 %x\n", param);
 
-	return param & HI_OPTION_SDIO_CRASH_DUMP_ENHANCEMENT_FW;
+	return !!(param & HI_OPTION_SDIO_CRASH_DUMP_ENHANCEMENT_FW);
 }
 
 static void ath10k_sdio_dump_registers(struct ath10k *ar,
@@ -2312,8 +2315,8 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 	}
 
 	count = 0;
-
-	for (i = 0; cur_section; i++) {
+	i = 0;
+	for (; cur_section; cur_section = next_section) {
 		section_size = cur_section->end - cur_section->start;
 
 		if (section_size <= 0) {
@@ -2323,7 +2326,7 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 			break;
 		}
 
-		if ((i + 1) == mem_region->section_table.size) {
+		if (++i == mem_region->section_table.size) {
 			/* last section */
 			next_section = NULL;
 			skip_size = 0;
@@ -2366,12 +2369,6 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 		}
 
 		count += skip_size;
-
-		if (!next_section)
-			/* this was the last section */
-			break;
-
-		cur_section = next_section;
 	}
 
 	return count;

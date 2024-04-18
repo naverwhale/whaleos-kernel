@@ -10,6 +10,8 @@
 #ifndef AQ_NIC_H
 #define AQ_NIC_H
 
+#include <linux/ethtool.h>
+
 #include "aq_common.h"
 #include "aq_rss.h"
 #include "aq_hw.h"
@@ -152,6 +154,8 @@ struct aq_nic_s {
 	struct mutex fwreq_mutex;
 #if IS_ENABLED(CONFIG_MACSEC)
 	struct aq_macsec_cfg *macsec_cfg;
+	/* mutex to protect data in macsec_cfg */
+	struct mutex macsec_mutex;
 #endif
 	/* PTP support */
 	struct aq_ptp_s *aq_ptp;

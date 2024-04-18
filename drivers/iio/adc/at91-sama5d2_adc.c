@@ -74,7 +74,7 @@
 #define	AT91_SAMA5D2_MR_ANACH		BIT(23)
 /* Tracking Time */
 #define	AT91_SAMA5D2_MR_TRACKTIM(v)	((v) << 24)
-#define	AT91_SAMA5D2_MR_TRACKTIM_MAX	0xff
+#define	AT91_SAMA5D2_MR_TRACKTIM_MAX	0xf
 /* Transfer Time */
 #define	AT91_SAMA5D2_MR_TRANSFER(v)	((v) << 28)
 #define	AT91_SAMA5D2_MR_TRANSFER_MAX	0x3
@@ -743,26 +743,24 @@ static int at91_adc_configure_trigger(struct iio_trigger *trig, bool state)
 	return 0;
 }
 
-static int at91_adc_reenable_trigger(struct iio_trigger *trig)
+static void at91_adc_reenable_trigger(struct iio_trigger *trig)
 {
 	struct iio_dev *indio = iio_trigger_get_drvdata(trig);
 	struct at91_adc_state *st = iio_priv(indio);
 
 	/* if we are using DMA, we must not reenable irq after each trigger */
 	if (st->dma_st.dma_chan)
-		return 0;
+		return;
 
 	enable_irq(st->irq);
 
 	/* Needed to ACK the DRDY interruption */
 	at91_adc_readl(st, AT91_SAMA5D2_LCDR);
-
-	return 0;
 }
 
 static const struct iio_trigger_ops at91_adc_trigger_ops = {
 	.set_trigger_state = &at91_adc_configure_trigger,
-	.try_reenable = &at91_adc_reenable_trigger,
+	.reenable = &at91_adc_reenable_trigger,
 	.validate_device = iio_trigger_validate_own_device,
 };
 
@@ -896,7 +894,7 @@ static int at91_adc_buffer_prepare(struct iio_dev *indio_dev)
 		return at91_adc_configure_touch(st, true);
 
 	/* if we are not in triggered mode, we cannot enable the buffer. */
-	if (!(indio_dev->currentmode & INDIO_ALL_TRIGGERED_MODES))
+	if (!(iio_device_get_current_mode(indio_dev) & INDIO_ALL_TRIGGERED_MODES))
 		return -EINVAL;
 
 	/* we continue with the triggered buffer */
@@ -949,7 +947,7 @@ static int at91_adc_buffer_postdisable(struct iio_dev *indio_dev)
 		return at91_adc_configure_touch(st, false);
 
 	/* if we are not in triggered mode, nothing to do here */
-	if (!(indio_dev->currentmode & INDIO_ALL_TRIGGERED_MODES))
+	if (!(iio_device_get_current_mode(indio_dev) & INDIO_ALL_TRIGGERED_MODES))
 		return -EINVAL;
 
 	/*
@@ -1000,9 +998,9 @@ static struct iio_trigger *at91_adc_allocate_trigger(struct iio_dev *indio,
 	int ret;
 
 	trig = devm_iio_trigger_alloc(&indio->dev, "%s-dev%d-%s", indio->name,
-				      indio->id, trigger_name);
+				iio_device_id(indio), trigger_name);
 	if (!trig)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	trig->dev.parent = indio->dev.parent;
 	iio_trigger_set_drvdata(trig, indio);
@@ -1014,21 +1012,6 @@ static struct iio_trigger *at91_adc_allocate_trigger(struct iio_dev *indio,
 
 	return trig;
 }
-
-static int at91_adc_trigger_init(struct iio_dev *indio)
-{
-	struct at91_adc_state *st = iio_priv(indio);
-
-	st->trig = at91_adc_allocate_trigger(indio, st->selected_trig->name);
-	if (IS_ERR(st->trig)) {
-		dev_err(&indio->dev,
-			"could not allocate trigger\n");
-		return PTR_ERR(st->trig);
-	}
-
-	return 0;
-}
-
 static void at91_adc_trigger_handler_nodma(struct iio_dev *indio_dev,
 					   struct iio_poll_func *pf)
 {
@@ -1154,13 +1137,6 @@ static irqreturn_t at91_adc_trigger_handler(int irq, void *p)
 	iio_trigger_notify_done(indio_dev->trig);
 
 	return IRQ_HANDLED;
-}
-
-static int at91_adc_buffer_init(struct iio_dev *indio)
-{
-	return devm_iio_triggered_buffer_setup(&indio->dev, indio,
-		&iio_pollfunc_store_time,
-		&at91_adc_trigger_handler, &at91_buffer_setup_ops);
 }
 
 static unsigned at91_adc_startup_time(unsigned startup_time_min,
@@ -1353,10 +1329,12 @@ static int at91_adc_read_info_raw(struct iio_dev *indio_dev,
 		ret = at91_adc_read_position(st, chan->channel,
 					     &tmp_val);
 		*val = tmp_val;
+		if (ret > 0)
+			ret = at91_adc_adjust_val_osr(st, val);
 		mutex_unlock(&st->lock);
 		iio_device_release_direct_mode(indio_dev);
 
-		return at91_adc_adjust_val_osr(st, val);
+		return ret;
 	}
 	if (chan->type == IIO_PRESSURE) {
 		ret = iio_device_claim_direct_mode(indio_dev);
@@ -1367,10 +1345,12 @@ static int at91_adc_read_info_raw(struct iio_dev *indio_dev,
 		ret = at91_adc_read_pressure(st, chan->channel,
 					     &tmp_val);
 		*val = tmp_val;
+		if (ret > 0)
+			ret = at91_adc_adjust_val_osr(st, val);
 		mutex_unlock(&st->lock);
 		iio_device_release_direct_mode(indio_dev);
 
-		return at91_adc_adjust_val_osr(st, val);
+		return ret;
 	}
 
 	/* in this case we have a voltage channel */
@@ -1401,7 +1381,8 @@ static int at91_adc_read_info_raw(struct iio_dev *indio_dev,
 		*val = st->conversion_value;
 		ret = at91_adc_adjust_val_osr(st, val);
 		if (chan->scan_type.sign == 's')
-			*val = sign_extend32(*val, 11);
+			*val = sign_extend32(*val,
+					     chan->scan_type.realbits - 1);
 		st->conversion_done = false;
 	}
 
@@ -1460,20 +1441,24 @@ static int at91_adc_write_raw(struct iio_dev *indio_dev,
 		/* if no change, optimize out */
 		if (val == st->oversampling_ratio)
 			return 0;
+		mutex_lock(&st->lock);
 		st->oversampling_ratio = val;
 		/* update ratio */
 		at91_adc_config_emr(st);
+		mutex_unlock(&st->lock);
 		return 0;
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		if (val < st->soc_info.min_sample_rate ||
 		    val > st->soc_info.max_sample_rate)
 			return -EINVAL;
 
+		mutex_lock(&st->lock);
 		at91_adc_setup_samp_freq(indio_dev, val);
+		mutex_unlock(&st->lock);
 		return 0;
 	default:
 		return -EINVAL;
-	};
+	}
 }
 
 static void at91_adc_dma_init(struct platform_device *pdev)
@@ -1692,6 +1677,44 @@ static const struct iio_info at91_adc_info = {
 	.hwfifo_set_watermark = &at91_adc_set_watermark,
 };
 
+static int at91_adc_buffer_and_trigger_init(struct device *dev,
+					    struct iio_dev *indio)
+{
+	struct at91_adc_state *st = iio_priv(indio);
+	const struct attribute **fifo_attrs;
+	int ret;
+
+	if (st->selected_trig->hw_trig)
+		fifo_attrs = at91_adc_fifo_attributes;
+	else
+		fifo_attrs = NULL;
+
+	ret = devm_iio_triggered_buffer_setup_ext(&indio->dev, indio,
+		&iio_pollfunc_store_time,
+		&at91_adc_trigger_handler, &at91_buffer_setup_ops, fifo_attrs);
+	if (ret < 0) {
+		dev_err(dev, "couldn't initialize the buffer.\n");
+		return ret;
+	}
+
+	if (!st->selected_trig->hw_trig)
+		return 0;
+
+	st->trig = at91_adc_allocate_trigger(indio, st->selected_trig->name);
+	if (IS_ERR(st->trig)) {
+		dev_err(dev, "could not allocate trigger\n");
+		return PTR_ERR(st->trig);
+	}
+
+	/*
+	 * Initially the iio buffer has a length of 2 and
+	 * a watermark of 1
+	 */
+	st->dma_st.watermark = 1;
+
+	return 0;
+}
+
 static int at91_adc_probe(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev;
@@ -1827,27 +1850,9 @@ static int at91_adc_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, indio_dev);
 
-	ret = at91_adc_buffer_init(indio_dev);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "couldn't initialize the buffer.\n");
+	ret = at91_adc_buffer_and_trigger_init(&pdev->dev, indio_dev);
+	if (ret < 0)
 		goto per_clk_disable_unprepare;
-	}
-
-	if (st->selected_trig->hw_trig) {
-		ret = at91_adc_trigger_init(indio_dev);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "couldn't setup the triggers.\n");
-			goto per_clk_disable_unprepare;
-		}
-		/*
-		 * Initially the iio buffer has a length of 2 and
-		 * a watermark of 1
-		 */
-		st->dma_st.watermark = 1;
-
-		iio_buffer_set_attrs(indio_dev->buffer,
-				     at91_adc_fifo_attributes);
-	}
 
 	if (dma_coerce_mask_and_coherent(&indio_dev->dev, DMA_BIT_MASK(32)))
 		dev_info(&pdev->dev, "cannot set DMA mask to 32-bit\n");
@@ -1898,6 +1903,9 @@ static __maybe_unused int at91_adc_suspend(struct device *dev)
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct at91_adc_state *st = iio_priv(indio_dev);
 
+	if (iio_buffer_enabled(indio_dev))
+		at91_adc_buffer_postdisable(indio_dev);
+
 	/*
 	 * Do a sofware reset of the ADC before we go to suspend.
 	 * this will ensure that all pins are free from being muxed by the ADC
@@ -1941,14 +1949,11 @@ static __maybe_unused int at91_adc_resume(struct device *dev)
 	if (!iio_buffer_enabled(indio_dev))
 		return 0;
 
-	/* check if we are enabling triggered buffer or the touchscreen */
-	if (at91_adc_current_chan_is_touch(indio_dev))
-		return at91_adc_configure_touch(st, true);
-	else
-		return at91_adc_configure_trigger(st->trig, true);
+	ret = at91_adc_buffer_prepare(indio_dev);
+	if (ret)
+		goto vref_disable_resume;
 
-	/* not needed but more explicit */
-	return 0;
+	return at91_adc_configure_trigger(st->trig, true);
 
 vref_disable_resume:
 	regulator_disable(st->vref);

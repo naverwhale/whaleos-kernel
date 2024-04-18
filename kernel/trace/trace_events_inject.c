@@ -192,7 +192,6 @@ static void *trace_alloc_entry(struct trace_event_call *call, int *size)
 static int parse_entry(char *str, struct trace_event_call *call, void **pentry)
 {
 	struct ftrace_event_field *field;
-	unsigned long irq_flags;
 	void *entry = NULL;
 	int entry_size;
 	u64 val = 0;
@@ -203,9 +202,8 @@ static int parse_entry(char *str, struct trace_event_call *call, void **pentry)
 	if (!entry)
 		return -ENOMEM;
 
-	local_save_flags(irq_flags);
-	tracing_generic_entry_update(entry, call->event.type, irq_flags,
-				     preempt_count());
+	tracing_generic_entry_update(entry, call->event.type,
+				     0, tracing_gen_ctx());
 
 	while ((len = parse_field(str, call, &field, &val)) > 0) {
 		if (is_function_field(field))
@@ -323,7 +321,8 @@ event_inject_read(struct file *file, char __user *buf, size_t size,
 }
 
 const struct file_operations event_inject_fops = {
-	.open = tracing_open_generic,
+	.open = tracing_open_file_tr,
 	.read = event_inject_read,
 	.write = event_inject_write,
+	.release = tracing_release_file_tr,
 };

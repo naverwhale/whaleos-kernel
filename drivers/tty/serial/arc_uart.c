@@ -149,7 +149,7 @@ static unsigned int arc_serial_tx_empty(struct uart_port *port)
 /*
  * Driver internal routine, used by both tty(serial core) as well as tx-isr
  *  -Called under spinlock in either cases
- *  -also tty->stopped has already been checked
+ *  -also tty->flow.stopped has already been checked
  *     = by uart_start( ) before calling us
  *     = tx_ist checks that too before calling
  */
@@ -236,9 +236,7 @@ static void arc_serial_rx_chars(struct uart_port *port, unsigned int status)
 		if (!(uart_handle_sysrq_char(port, ch)))
 			uart_insert_char(port, status, RXOERR, ch, flg);
 
-		spin_unlock(&port->lock);
 		tty_flip_buffer_push(&port->state->port);
-		spin_lock(&port->lock);
 	} while (!((status = UART_GET_STATUS(port)) & RXEMPTY));
 }
 
@@ -609,10 +607,11 @@ static int arc_serial_probe(struct platform_device *pdev)
 	}
 	uart->baud = val;
 
-	port->membase = of_iomap(np, 0);
-	if (!port->membase)
+	port->membase = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(port->membase)) {
 		/* No point of dev_err since UART itself is hosed here */
-		return -ENXIO;
+		return PTR_ERR(port->membase);
+	}
 
 	port->irq = irq_of_parse_and_map(np, 0);
 

@@ -314,7 +314,7 @@ static void faraday_pci_irq_handler(struct irq_desc *desc)
 	for (i = 0; i < 4; i++) {
 		if ((irq_stat & BIT(i)) == 0)
 			continue;
-		generic_handle_irq(irq_find_mapping(p->irqdomain, i));
+		generic_handle_domain_irq(p->irqdomain, i);
 	}
 
 	chained_irq_exit(irqchip, desc);
@@ -442,22 +442,12 @@ static int faraday_pci_probe(struct platform_device *pdev)
 	p->dev = dev;
 
 	/* Retrieve and enable optional clocks */
-	clk = devm_clk_get(dev, "PCLK");
+	clk = devm_clk_get_enabled(dev, "PCLK");
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
-	ret = clk_prepare_enable(clk);
-	if (ret) {
-		dev_err(dev, "could not prepare PCLK\n");
-		return ret;
-	}
-	p->bus_clk = devm_clk_get(dev, "PCICLK");
+	p->bus_clk = devm_clk_get_enabled(dev, "PCICLK");
 	if (IS_ERR(p->bus_clk))
 		return PTR_ERR(p->bus_clk);
-	ret = clk_prepare_enable(p->bus_clk);
-	if (ret) {
-		dev_err(dev, "could not prepare PCICLK\n");
-		return ret;
-	}
 
 	p->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(p->base))

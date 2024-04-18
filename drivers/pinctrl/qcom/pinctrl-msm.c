@@ -52,6 +52,7 @@
  *                  detection.
  * @skip_wake_irqs: Skip IRQs that are handled by wakeup interrupt controller
  * @disabled_for_mux: These IRQs were disabled because we muxed away.
+ * @ever_gpio:      This bit is set the first time we mux a pin to gpio_func.
  * @soc:            Reference to soc_data of platform specific data.
  * @regs:           Base addresses for the TLMM tiles.
  * @phys_base:      Physical base address
@@ -74,6 +75,7 @@ struct msm_pinctrl {
 	DECLARE_BITMAP(enabled_irqs, MAX_NR_GPIO);
 	DECLARE_BITMAP(skip_wake_irqs, MAX_NR_GPIO);
 	DECLARE_BITMAP(disabled_for_mux, MAX_NR_GPIO);
+	DECLARE_BITMAP(ever_gpio, MAX_NR_GPIO);
 
 	const struct msm_pinctrl_soc_data *soc;
 	void __iomem *regs[MAX_NR_TILES];
@@ -185,6 +187,7 @@ static int msm_pinmux_set_mux(struct pinctrl_dev *pctldev,
 	unsigned int irq = irq_find_mapping(gc->irq.domain, group);
 	struct irq_data *d = irq_get_irq_data(irq);
 	unsigned int gpio_func = pctrl->soc->gpio_func;
+	unsigned int egpio_func = pctrl->soc->egpio_func;
 	const struct msm_pingroup *g;
 	unsigned long flags;
 	u32 val, mask;
@@ -218,8 +221,37 @@ static int msm_pinmux_set_mux(struct pinctrl_dev *pctldev,
 	raw_spin_lock_irqsave(&pctrl->lock, flags);
 
 	val = msm_readl_ctl(pctrl, g);
-	val &= ~mask;
-	val |= i << g->mux_bit;
+
+	/*
+	 * If this is the first time muxing to GPIO and the direction is
+	 * output, make sure that we're not going to be glitching the pin
+	 * by reading the current state of the pin and setting it as the
+	 * output.
+	 */
+	if (i == gpio_func && (val & BIT(g->oe_bit)) &&
+	    !test_and_set_bit(group, pctrl->ever_gpio)) {
+		u32 io_val = msm_readl_io(pctrl, g);
+
+		if (io_val & BIT(g->in_bit)) {
+			if (!(io_val & BIT(g->out_bit)))
+				msm_writel_io(io_val | BIT(g->out_bit), pctrl, g);
+		} else {
+			if (io_val & BIT(g->out_bit))
+				msm_writel_io(io_val & ~BIT(g->out_bit), pctrl, g);
+		}
+	}
+
+	if (egpio_func && i == egpio_func) {
+		if (val & BIT(g->egpio_present))
+			val &= ~BIT(g->egpio_enable);
+	} else {
+		val &= ~mask;
+		val |= i << g->mux_bit;
+		/* Claim ownership of pin if egpio capable */
+		if (egpio_func && val & BIT(g->egpio_present))
+			val |= BIT(g->egpio_enable);
+	}
+
 	msm_writel_ctl(val, pctrl, g);
 
 	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
@@ -288,6 +320,7 @@ static int msm_config_reg(struct msm_pinctrl *pctrl,
 		break;
 	case PIN_CONFIG_OUTPUT:
 	case PIN_CONFIG_INPUT_ENABLE:
+	case PIN_CONFIG_OUTPUT_ENABLE:
 		*bit = g->oe_bit;
 		*mask = 1;
 		break;
@@ -376,11 +409,9 @@ static int msm_config_group_get(struct pinctrl_dev *pctldev,
 		val = msm_readl_io(pctrl, g);
 		arg = !!(val & BIT(g->in_bit));
 		break;
-	case PIN_CONFIG_INPUT_ENABLE:
-		/* Pin is output */
-		if (arg)
+	case PIN_CONFIG_OUTPUT_ENABLE:
+		if (!arg)
 			return -EINVAL;
-		arg = 1;
 		break;
 	default:
 		return -ENOTSUPP;
@@ -462,8 +493,35 @@ static int msm_config_group_set(struct pinctrl_dev *pctldev,
 			arg = 1;
 			break;
 		case PIN_CONFIG_INPUT_ENABLE:
-			/* disable output */
+			/*
+			 * According to pinctrl documentation this should
+			 * actually be a no-op.
+			 *
+			 * The docs are explicit that "this does not affect
+			 * the pin's ability to drive output" but what we do
+			 * here is to modify the output enable bit. Thus, to
+			 * follow the docs we should remove that.
+			 *
+			 * The docs say that we should enable any relevant
+			 * input buffer, but TLMM there is no input buffer that
+			 * can be enabled/disabled. It's always on.
+			 *
+			 * The points above, explain why this _should_ be a
+			 * no-op. However, for historical reasons and to
+			 * support old device trees, we'll violate the docs
+			 * and still affect the output.
+			 *
+			 * It should further be noted that this old historical
+			 * behavior actually overrides arg to 0. That means
+			 * that "input-enable" and "input-disable" in a device
+			 * tree would _both_ disable the output. We'll
+			 * continue to preserve this behavior as well since
+			 * we have no other use for this attribute.
+			 */
 			arg = 0;
+			break;
+		case PIN_CONFIG_OUTPUT_ENABLE:
+			arg = !!arg;
 			break;
 		default:
 			dev_err(pctrl->dev, "Unsupported config parameter: %x\n",
@@ -1177,7 +1235,6 @@ static void msm_gpio_irq_handler(struct irq_desc *desc)
 	const struct msm_pingroup *g;
 	struct msm_pinctrl *pctrl = gpiochip_get_data(gc);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	int irq_pin;
 	int handled = 0;
 	u32 val;
 	int i;
@@ -1192,8 +1249,7 @@ static void msm_gpio_irq_handler(struct irq_desc *desc)
 		g = &pctrl->soc->groups[i];
 		val = msm_readl_intr_status(pctrl, g);
 		if (val & BIT(g->intr_status_bit)) {
-			irq_pin = irq_find_mapping(gc->irq.domain, i);
-			generic_handle_irq(irq_pin);
+			generic_handle_domain_irq(gc->irq.domain, i);
 			handled++;
 		}
 	}
@@ -1473,3 +1529,5 @@ int msm_pinctrl_remove(struct platform_device *pdev)
 }
 EXPORT_SYMBOL(msm_pinctrl_remove);
 
+MODULE_DESCRIPTION("Qualcomm Technologies, Inc. TLMM driver");
+MODULE_LICENSE("GPL v2");

@@ -212,6 +212,7 @@ static asmlinkage long alt_sys_prctl(struct pt_regs *regs);
 #define __NR_compat_lsetxattr   __NR_ia32_lsetxattr
 #define __NR_compat_lstat       __NR_ia32_lstat
 #define __NR_compat_madvise     __NR_ia32_madvise
+#define __NR_compat_membarrier  __NR_ia32_membarrier
 #define __NR_compat_memfd_create        __NR_ia32_memfd_create
 #define __NR_compat_mincore     __NR_ia32_mincore
 #define __NR_compat_mkdir       __NR_ia32_mkdir
@@ -259,6 +260,7 @@ static asmlinkage long alt_sys_prctl(struct pt_regs *regs);
 #define __NR_compat_removexattr __NR_ia32_removexattr
 #define __NR_compat_rename      __NR_ia32_rename
 #define __NR_compat_renameat    __NR_ia32_renameat
+#define __NR_compat_renameat2   __NR_ia32_renameat2
 #define __NR_compat_restart_syscall     __NR_ia32_restart_syscall
 #define __NR_compat_rmdir       __NR_ia32_rmdir
 #define __NR_compat_rt_sigaction        __NR_ia32_rt_sigaction

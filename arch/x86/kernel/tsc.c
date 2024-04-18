@@ -14,6 +14,7 @@
 #include <linux/percpu.h>
 #include <linux/timex.h>
 #include <linux/static_key.h>
+#include <linux/static_call.h>
 
 #include <asm/hpet.h>
 #include <asm/timer.h>
@@ -254,7 +255,7 @@ unsigned long long sched_clock(void)
 
 bool using_native_sched_clock(void)
 {
-	return pv_ops.time.sched_clock == native_sched_clock;
+	return static_call_query(pv_sched_clock) == native_sched_clock;
 }
 #else
 unsigned long long
@@ -650,14 +651,20 @@ unsigned long native_calibrate_tsc(void)
 	 * This is temporary workaround for bugs:
 	 * b/148108096, b/154283905, b/146787525, b/153400677, b/148178929
 	 * chromium/1031054
+	 *
+	 * Temporarily adding workaround for hatch devices - Kohaku, dratini
+	 * and jinlon. (b/244456300)
 	 */
 	if (crystal_khz == 0) {
 		switch (boot_cpu_data.x86_model) {
-			case INTEL_FAM6_SKYLAKE_L:
+		case INTEL_FAM6_KABYLAKE_L:
 			crystal_khz = 24000;	/* 24.0 MHz */
 			break;
 		case INTEL_FAM6_ATOM_GOLDMONT_D:
 			crystal_khz = 25000;	/* 25.0 MHz */
+			break;
+		case INTEL_FAM6_SKYLAKE_L:
+			crystal_khz = 24000;	/* 24.0 MHz */
 			break;
 		}
 	}
@@ -753,7 +760,7 @@ static unsigned long pit_hpet_ptimer_calibrate_cpu(void)
 	 * 2) Reference counter. If available we use the HPET or the
 	 * PMTIMER as a reference to check the sanity of that value.
 	 * We use separate TSC readouts and check inside of the
-	 * reference read for any possible disturbance. We dicard
+	 * reference read for any possible disturbance. We discard
 	 * disturbed values here as well. We do that around the PIT
 	 * calibration delay loop as we have to wait for a certain
 	 * amount of time anyway.
@@ -1093,7 +1100,7 @@ static void tsc_resume(struct clocksource *cs)
  * very small window right after one CPU updated cycle_last under
  * xtime/vsyscall_gtod lock and the other CPU reads a TSC value which
  * is smaller than the cycle_last reference value due to a TSC which
- * is slighty behind. This delta is nowhere else observable, but in
+ * is slightly behind. This delta is nowhere else observable, but in
  * that case it results in a forward time jump in the range of hours
  * due to the unsigned delta calculation of the time keeping core
  * code, which is necessary to support wrapping clocksources like pm
@@ -1141,6 +1148,7 @@ static int tsc_cs_enable(struct clocksource *cs)
 static struct clocksource clocksource_tsc_early = {
 	.name			= "tsc-early",
 	.rating			= 299,
+	.uncertainty_margin	= 32 * NSEC_PER_MSEC,
 	.read			= read_tsc,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
@@ -1192,6 +1200,12 @@ void mark_tsc_unstable(char *reason)
 
 EXPORT_SYMBOL_GPL(mark_tsc_unstable);
 
+static void __init tsc_disable_clocksource_watchdog(void)
+{
+	clocksource_tsc_early.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
+	clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
+}
+
 static void __init check_system_tsc_reliable(void)
 {
 #if defined(CONFIG_MGEODEGX1) || defined(CONFIG_MGEODE_LX) || defined(CONFIG_X86_GENERIC)
@@ -1208,6 +1222,23 @@ static void __init check_system_tsc_reliable(void)
 #endif
 	if (boot_cpu_has(X86_FEATURE_TSC_RELIABLE))
 		tsc_clocksource_reliable = 1;
+
+	/*
+	 * Disable the clocksource watchdog when the system has:
+	 *  - TSC running at constant frequency
+	 *  - TSC which does not stop in C-States
+	 *  - the TSC_ADJUST register which allows to detect even minimal
+	 *    modifications
+	 *  - not more than two sockets. As the number of sockets cannot be
+	 *    evaluated at the early boot stage where this has to be
+	 *    invoked, check the number of online memory nodes as a
+	 *    fallback solution which is an reasonable estimate.
+	 */
+	if (boot_cpu_has(X86_FEATURE_CONSTANT_TSC) &&
+	    boot_cpu_has(X86_FEATURE_NONSTOP_TSC) &&
+	    boot_cpu_has(X86_FEATURE_TSC_ADJUST) &&
+	    nr_online_nodes <= 2)
+		tsc_disable_clocksource_watchdog();
 }
 
 /*
@@ -1279,7 +1310,7 @@ EXPORT_SYMBOL(convert_art_to_tsc);
  *	corresponding clocksource
  *	@cycles:	System counter value
  *	@cs:		Clocksource corresponding to system counter value. Used
- *			by timekeeping code to verify comparibility of two cycle
+ *			by timekeeping code to verify comparability of two cycle
  *			values.
  */
 
@@ -1404,9 +1435,6 @@ static int __init init_tsc_clocksource(void)
 	if (tsc_unstable)
 		goto unreg;
 
-	if (tsc_clocksource_reliable || no_tsc_watchdog)
-		clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
-
 	if (boot_cpu_has(X86_FEATURE_NONSTOP_TSC_S3))
 		clocksource_tsc.flags |= CLOCK_SOURCE_SUSPEND_NONSTOP;
 
@@ -1434,8 +1462,6 @@ device_initcall(init_tsc_clocksource);
 
 static bool __init determine_cpu_tsc_frequencies(bool early)
 {
-	u64 initial_tsc;
-
 	/* Make sure that cpu and tsc are not already calibrated */
 	WARN_ON(cpu_khz || tsc_khz);
 
@@ -1451,8 +1477,6 @@ static bool __init determine_cpu_tsc_frequencies(bool early)
 		cpu_khz = pit_hpet_ptimer_calibrate_cpu();
 	}
 
-	initial_tsc = rdtsc();
-
 	/*
 	 * Trust non-zero tsc_khz as authoritative,
 	 * and use it to sanity check cpu_khz,
@@ -1465,10 +1489,6 @@ static bool __init determine_cpu_tsc_frequencies(bool early)
 
 	if (tsc_khz == 0)
 		return false;
-
-	do_div(initial_tsc, cpu_khz / 1000);
-	pr_info("Initial usec timer %llu\n",
-		(unsigned long long)initial_tsc);
 
 	pr_info("Detected %lu.%03lu MHz processor\n",
 		(unsigned long)cpu_khz / KHZ,
@@ -1552,7 +1572,7 @@ void __init tsc_init(void)
 	}
 
 	if (tsc_clocksource_reliable || no_tsc_watchdog)
-		clocksource_tsc_early.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
+		tsc_disable_clocksource_watchdog();
 
 	clocksource_register_khz(&clocksource_tsc_early, tsc_khz);
 	detect_art();

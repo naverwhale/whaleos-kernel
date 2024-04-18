@@ -129,6 +129,7 @@
  *
  */
 
+#include <linux/refcount.h>
 #include <linux/rmap.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
@@ -358,7 +359,7 @@ struct gru_thread_state {
 						     enabled */
 	int			ts_ctxnum;	/* context number where the
 						   context is loaded */
-	atomic_t		ts_refcnt;	/* reference count GTS */
+	refcount_t		ts_refcnt;	/* reference count GTS */
 	unsigned char		ts_dsr_au_count;/* Number of DSR resources
 						   required for contest */
 	unsigned char		ts_cbr_au_count;/* Number of CBR resources
@@ -637,7 +638,7 @@ extern int gru_user_flush_tlb(unsigned long arg);
 extern int gru_user_unload_context(unsigned long arg);
 extern int gru_get_exception_detail(unsigned long arg);
 extern int gru_set_context_option(unsigned long address);
-extern void gru_check_context_placement(struct gru_thread_state *gts);
+extern int gru_check_context_placement(struct gru_thread_state *gts);
 extern int gru_cpu_fault_map_id(void);
 extern struct vm_area_struct *gru_find_vma(unsigned long vaddr);
 extern void gru_flush_all_tlb(struct gru_state *gru);

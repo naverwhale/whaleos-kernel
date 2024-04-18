@@ -200,16 +200,6 @@ copy_to_user(void __user *to, const void *from, unsigned long n)
 		n = _copy_to_user(to, from, n);
 	return n;
 }
-#ifdef CONFIG_COMPAT
-static __always_inline unsigned long __must_check
-copy_in_user(void __user *to, const void __user *from, unsigned long n)
-{
-	might_fault();
-	if (access_ok(to, n) && access_ok(from, n))
-		n = raw_copy_in_user(to, from, n);
-	return n;
-}
-#endif
 
 #ifndef copy_mc_to_kernel
 /*
@@ -348,6 +338,10 @@ copy_struct_from_user(void *dst, size_t ksize, const void __user *src,
 	size_t size = min(ksize, usize);
 	size_t rest = max(ksize, usize) - size;
 
+	/* Double check if ksize is larger than a known object size. */
+	if (WARN_ON_ONCE(ksize > __builtin_object_size(dst, 1)))
+		return -E2BIG;
+
 	/* Deal with trailing bytes. */
 	if (usize < ksize) {
 		memset(dst + size, 0, rest);
@@ -397,6 +391,7 @@ long strnlen_user_nofault(const void __user *unsafe_addr, long count);
 #define unsafe_get_user(x,p,e) unsafe_op_wrap(__get_user(x,p),e)
 #define unsafe_put_user(x,p,e) unsafe_op_wrap(__put_user(x,p),e)
 #define unsafe_copy_to_user(d,s,l,e) unsafe_op_wrap(__copy_to_user(d,s,l),e)
+#define unsafe_copy_from_user(d,s,l,e) unsafe_op_wrap(__copy_from_user(d,s,l),e)
 static inline unsigned long user_access_save(void) { return 0UL; }
 static inline void user_access_restore(unsigned long flags) { }
 #endif

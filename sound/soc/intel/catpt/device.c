@@ -19,9 +19,9 @@
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <sound/intel-dsp-config.h>
 #include <sound/soc.h>
 #include <sound/soc-acpi.h>
-#include <sound/soc-acpi-intel-match.h>
 #include "core.h"
 #include "registers.h"
 
@@ -239,17 +239,25 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	const struct catpt_spec *spec;
 	struct catpt_dev *cdev;
 	struct device *dev = &pdev->dev;
+	const struct acpi_device_id *id;
 	struct resource *res;
 	int ret;
 
-	spec = device_get_match_data(dev);
-	if (!spec)
+	id = acpi_match_device(dev->driver->acpi_match_table, dev);
+	if (!id)
 		return -ENODEV;
+
+	ret = snd_intel_acpi_dsp_driver_probe(dev, id->id);
+	if (ret != SND_INTEL_DSP_DRIVER_ANY && ret != SND_INTEL_DSP_DRIVER_SST) {
+		dev_dbg(dev, "CATPT ACPI driver not selected, aborting probe\n");
+		return -ENODEV;
+	}
 
 	cdev = devm_kzalloc(dev, sizeof(*cdev), GFP_KERNEL);
 	if (!cdev)
 		return -ENOMEM;
 
+	spec = (const struct catpt_spec *)id->driver_data;
 	catpt_dev_init(cdev, dev, spec);
 
 	/* map DSP bar address */
@@ -301,8 +309,36 @@ static int catpt_acpi_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static struct snd_soc_acpi_mach lpt_machines[] = {
+	{
+		.id = "INT33CA",
+		.drv_name = "hsw_rt5640",
+	},
+	{}
+};
+
+static struct snd_soc_acpi_mach wpt_machines[] = {
+	{
+		.id = "INT33CA",
+		.drv_name = "hsw_rt5640",
+	},
+	{
+		.id = "INT343A",
+		.drv_name = "bdw_rt286",
+	},
+	{
+		.id = "10EC5650",
+		.drv_name = "bdw-rt5650",
+	},
+	{
+		.id = "RT5677CE",
+		.drv_name = "bdw-rt5677",
+	},
+	{}
+};
+
 static struct catpt_spec lpt_desc = {
-	.machines = snd_soc_acpi_intel_haswell_machines,
+	.machines = lpt_machines,
 	.core_id = 0x01,
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x080000,
@@ -317,7 +353,7 @@ static struct catpt_spec lpt_desc = {
 };
 
 static struct catpt_spec wpt_desc = {
-	.machines = snd_soc_acpi_intel_broadwell_machines,
+	.machines = wpt_machines,
 	.core_id = 0x02,
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x0A0000,

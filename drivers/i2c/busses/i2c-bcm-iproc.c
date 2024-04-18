@@ -93,6 +93,7 @@
 #define S_CMD_STATUS_MASK            0x07
 #define S_CMD_STATUS_SUCCESS         0x0
 #define S_CMD_STATUS_TIMEOUT         0x5
+#define S_CMD_STATUS_MASTER_ABORT    0x7
 
 #define IE_OFFSET                    0x38
 #define IE_M_RX_FIFO_FULL_SHIFT      31
@@ -242,13 +243,14 @@ static inline u32 iproc_i2c_rd_reg(struct bcm_iproc_i2c_dev *iproc_i2c,
 				   u32 offset)
 {
 	u32 val;
+	unsigned long flags;
 
 	if (iproc_i2c->idm_base) {
-		spin_lock(&iproc_i2c->idm_lock);
+		spin_lock_irqsave(&iproc_i2c->idm_lock, flags);
 		writel(iproc_i2c->ape_addr_mask,
 		       iproc_i2c->idm_base + IDM_CTRL_DIRECT_OFFSET);
 		val = readl(iproc_i2c->base + offset);
-		spin_unlock(&iproc_i2c->idm_lock);
+		spin_unlock_irqrestore(&iproc_i2c->idm_lock, flags);
 	} else {
 		val = readl(iproc_i2c->base + offset);
 	}
@@ -259,12 +261,14 @@ static inline u32 iproc_i2c_rd_reg(struct bcm_iproc_i2c_dev *iproc_i2c,
 static inline void iproc_i2c_wr_reg(struct bcm_iproc_i2c_dev *iproc_i2c,
 				    u32 offset, u32 val)
 {
+	unsigned long flags;
+
 	if (iproc_i2c->idm_base) {
-		spin_lock(&iproc_i2c->idm_lock);
+		spin_lock_irqsave(&iproc_i2c->idm_lock, flags);
 		writel(iproc_i2c->ape_addr_mask,
 		       iproc_i2c->idm_base + IDM_CTRL_DIRECT_OFFSET);
 		writel(val, iproc_i2c->base + offset);
-		spin_unlock(&iproc_i2c->idm_lock);
+		spin_unlock_irqrestore(&iproc_i2c->idm_lock, flags);
 	} else {
 		writel(val, iproc_i2c->base + offset);
 	}
@@ -312,6 +316,8 @@ static void bcm_iproc_i2c_slave_init(
 
 	/* Enable interrupt register to indicate a valid byte in receive fifo */
 	val = BIT(IE_S_RX_EVENT_SHIFT);
+	/* Enable interrupt register to indicate Slave Rx FIFO Full */
+	val |= BIT(IE_S_RX_FIFO_FULL_SHIFT);
 	/* Enable interrupt register to indicate a Master read transaction */
 	val |= BIT(IE_S_RD_EVENT_SHIFT);
 	/* Enable interrupt register for the Slave BUSY command */
@@ -331,9 +337,10 @@ static void bcm_iproc_i2c_check_slave_status(
 		return;
 
 	val = (val >> S_CMD_STATUS_SHIFT) & S_CMD_STATUS_MASK;
-	if (val == S_CMD_STATUS_TIMEOUT) {
-		dev_err(iproc_i2c->device, "slave random stretch time timeout\n");
-
+	if (val == S_CMD_STATUS_TIMEOUT || val == S_CMD_STATUS_MASTER_ABORT) {
+		dev_err(iproc_i2c->device, (val == S_CMD_STATUS_TIMEOUT) ?
+			"slave random stretch time timeout\n" :
+			"Master aborted read transaction\n");
 		/* re-initialize i2c for recovery */
 		bcm_iproc_i2c_enable_disable(iproc_i2c, false);
 		bcm_iproc_i2c_slave_init(iproc_i2c, true);
@@ -432,9 +439,15 @@ static bool bcm_iproc_i2c_slave_isr(struct bcm_iproc_i2c_dev *iproc_i2c,
 	 *                    events
 	 * Master-read      : both IS_S_RX_EVENT_SHIFT and IS_S_RD_EVENT_SHIFT
 	 *                    events or only IS_S_RD_EVENT_SHIFT
+	 *
+	 * iproc has a slave rx fifo size of 64 bytes. Rx fifo full interrupt
+	 * (IS_S_RX_FIFO_FULL_SHIFT) will be generated when RX fifo becomes
+	 * full. This can happen if Master issues write requests of more than
+	 * 64 bytes.
 	 */
 	if (status & BIT(IS_S_RX_EVENT_SHIFT) ||
-	    status & BIT(IS_S_RD_EVENT_SHIFT)) {
+	    status & BIT(IS_S_RD_EVENT_SHIFT) ||
+	    status & BIT(IS_S_RX_FIFO_FULL_SHIFT)) {
 		/* disable slave interrupts */
 		val = iproc_i2c_rd_reg(iproc_i2c, IE_OFFSET);
 		val &= ~iproc_i2c->slave_int_mask;
@@ -450,9 +463,14 @@ static bool bcm_iproc_i2c_slave_isr(struct bcm_iproc_i2c_dev *iproc_i2c,
 		/* schedule tasklet to read data later */
 		tasklet_schedule(&iproc_i2c->slave_rx_tasklet);
 
-		/* clear only IS_S_RX_EVENT_SHIFT interrupt */
-		iproc_i2c_wr_reg(iproc_i2c, IS_OFFSET,
-				 BIT(IS_S_RX_EVENT_SHIFT));
+		/*
+		 * clear only IS_S_RX_EVENT_SHIFT and
+		 * IS_S_RX_FIFO_FULL_SHIFT interrupt.
+		 */
+		val = BIT(IS_S_RX_EVENT_SHIFT);
+		if (status & BIT(IS_S_RX_FIFO_FULL_SHIFT))
+			val |= BIT(IS_S_RX_FIFO_FULL_SHIFT);
+		iproc_i2c_wr_reg(iproc_i2c, IS_OFFSET, val);
 	}
 
 	if (status & BIT(IS_S_TX_UNDERRUN_SHIFT)) {
@@ -481,7 +499,7 @@ static bool bcm_iproc_i2c_slave_isr(struct bcm_iproc_i2c_dev *iproc_i2c,
 	/* Stop received from master in case of master read transaction */
 	if (status & BIT(IS_S_START_BUSY_SHIFT)) {
 		/*
-		 * Enable interrupt for TX FIFO becomes empty and
+		 * Disable interrupt for TX FIFO becomes empty and
 		 * less than PKT_LENGTH bytes were output on the SMBUS
 		 */
 		iproc_i2c->slave_int_mask &= ~BIT(IE_S_TX_UNDERRUN_SHIFT);
@@ -1209,13 +1227,13 @@ static int bcm_iproc_i2c_unreg_slave(struct i2c_client *slave)
 
 	disable_irq(iproc_i2c->irq);
 
+	tasklet_kill(&iproc_i2c->slave_rx_tasklet);
+
 	/* disable all slave interrupts */
 	tmp = iproc_i2c_rd_reg(iproc_i2c, IE_OFFSET);
 	tmp &= ~(IE_S_ALL_INTERRUPT_MASK <<
 			IE_S_ALL_INTERRUPT_SHIFT);
 	iproc_i2c_wr_reg(iproc_i2c, IE_OFFSET, tmp);
-
-	tasklet_kill(&iproc_i2c->slave_rx_tasklet);
 
 	/* Erase the slave address programmed */
 	tmp = iproc_i2c_rd_reg(iproc_i2c, S_CFG_SMBUS_ADDR_OFFSET);

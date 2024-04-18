@@ -158,13 +158,13 @@ static int ks_wlan_get_name(struct net_device *dev,
 
 	/* for SLEEP MODE */
 	if (priv->dev_state < DEVICE_STATE_READY)
-		strcpy(cwrq->name, "NOT READY!");
+		strscpy(cwrq->name, "NOT READY!", sizeof(cwrq->name));
 	else if (priv->reg.phy_type == D_11B_ONLY_MODE)
-		strcpy(cwrq->name, "IEEE 802.11b");
+		strscpy(cwrq->name, "IEEE 802.11b", sizeof(cwrq->name));
 	else if (priv->reg.phy_type == D_11G_ONLY_MODE)
-		strcpy(cwrq->name, "IEEE 802.11g");
+		strscpy(cwrq->name, "IEEE 802.11g", sizeof(cwrq->name));
 	else
-		strcpy(cwrq->name, "IEEE 802.11b/g");
+		strscpy(cwrq->name, "IEEE 802.11b/g", sizeof(cwrq->name));
 
 	return 0;
 }
@@ -1584,8 +1584,10 @@ static int ks_wlan_set_encode_ext(struct net_device *dev,
 			commit |= SME_WEP_FLAG;
 		}
 		if (enc->key_len) {
-			memcpy(&key->key_val[0], &enc->key[0], enc->key_len);
-			key->key_len = enc->key_len;
+			int key_len = clamp_val(enc->key_len, 0, IW_ENCODING_TOKEN_MAX);
+
+			memcpy(&key->key_val[0], &enc->key[0], key_len);
+			key->key_len = key_len;
 			commit |= (SME_WEP_VAL1 << index);
 		}
 		break;
@@ -1808,8 +1810,8 @@ static int ks_wlan_get_firmware_version(struct net_device *dev,
 {
 	struct ks_wlan_private *priv = netdev_priv(dev);
 
-	strcpy(extra, priv->firmware_version);
 	dwrq->length = priv->version_size + 1;
+	strscpy(extra, priv->firmware_version, dwrq->length);
 	return 0;
 }
 

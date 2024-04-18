@@ -30,6 +30,7 @@ properties:
       panel. The novatek,nt36672a compatible shall always be provided as a fallback.
 
   reset-gpios:
+    maxItems: 1
     description: phandle of gpio for reset line - This should be 8mA, gpio
       can be configured using mux, pinctrl, pinctrl-names (active high)
 
@@ -45,6 +46,7 @@ properties:
 
   reg: true
   port: true
+  backlight: true
 
 required:
   - compatible
@@ -72,6 +74,7 @@ examples:
             vddpos-supply = <&lab>;
             vddneg-supply = <&ibb>;
 
+            backlight = <&pmi8998_wled>;
             reset-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
 
             #address-cells = <1>;

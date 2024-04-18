@@ -29,7 +29,12 @@
 #include "cam_debug_util.h"
 #include "cam_packet_util.h"
 
-static const char icp_dev_name[] = "cam-icp";
+const char *cam_icp_dev_name(void)
+{
+	static const char *dev_name = "cam-icp";
+
+	return dev_name;
+}
 
 static int cam_icp_context_dump_active_request(void *data, unsigned long iova,
 	uint32_t buf_info)
@@ -159,6 +164,7 @@ static int __cam_icp_config_dev_in_ready(struct cam_context *ctx,
 	if ((len < sizeof(struct cam_packet)) ||
 		(cmd->offset >= (len - sizeof(struct cam_packet)))) {
 		CAM_ERR(CAM_CTXT, "Not enough buf");
+		cam_mem_put_cpu_buf((int32_t) cmd->packet_handle);
 		return -EINVAL;
 	}
 
@@ -176,6 +182,7 @@ static int __cam_icp_config_dev_in_ready(struct cam_context *ctx,
 	if (rc)
 		CAM_ERR(CAM_ICP, "Failed to prepare device");
 
+	cam_mem_put_cpu_buf((int32_t) cmd->packet_handle);
 	return rc;
 }
 
@@ -277,7 +284,7 @@ int cam_icp_context_init(struct cam_icp_context *ctx,
 		goto err;
 	}
 
-	rc = cam_context_init(ctx->base, icp_dev_name, CAM_ICP, ctx_id,
+	rc = cam_context_init(ctx->base, cam_icp_dev_name(), CAM_ICP, ctx_id,
 		NULL, hw_intf, ctx->req_base, CAM_ICP_CTX_REQ_MAX);
 	if (rc) {
 		CAM_ERR(CAM_ICP, "Camera Context Base init failed");
@@ -304,4 +311,3 @@ int cam_icp_context_deinit(struct cam_icp_context *ctx)
 
 	return 0;
 }
-

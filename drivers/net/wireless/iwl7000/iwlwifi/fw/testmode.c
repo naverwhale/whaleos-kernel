@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2020 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2021 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
+ * Copyright (C) 2023 Intel Corporation
  */
 #include "iwl-trans.h"
 #include "iwl-tm-infc.h"
@@ -148,7 +149,7 @@ static int iwl_tm_get_dev_info(struct iwl_testmode *testmode,
 	dev_info->dev_id = testmode->trans->hw_id;
 	dev_info->fw_ver = testmode->fw->ucode_ver;
 	dev_info->vendor_id = PCI_VENDOR_ID_INTEL;
-	dev_info->silicon_step = CSR_HW_REV_STEP(testmode->trans->hw_rev);
+	dev_info->silicon_step = testmode->trans->hw_rev_step;
 
 	/* TODO: Assign real value when feature is implemented */
 	dev_info->build_ver = 0x00;
@@ -159,6 +160,30 @@ static int iwl_tm_get_dev_info(struct iwl_testmode *testmode,
 	data_out->len = sizeof(*dev_info);
 
 	return 0;
+}
+
+static bool iwl_tm_addr_range_prph(struct iwl_testmode *testmode, u32 addr)
+{
+	struct iwl_trans *trans = testmode->trans;
+
+	if (addr >= IWL_ABS_LMAC1_PRPH_START &&
+	    addr < IWL_ABS_LMAC1_PRPH_START + PRPH_END)
+		return true;
+
+	if (trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_AX210)
+		return false;
+
+	if (fw_has_capa(&testmode->fw->ucode_capa,
+			IWL_UCODE_TLV_CAPA_CDB_SUPPORT) &&
+	     addr >= IWL_ABS_LMAC2_PRPH_START &&
+	     addr < IWL_ABS_LMAC2_PRPH_START + PRPH_END)
+		return true;
+
+	if (addr >= IWL_ABS_UMAC_PRPH_START &&
+	    addr < IWL_ABS_UMAC_PRPH_START + PRPH_END)
+		return true;
+
+	return false;
 }
 
 static int iwl_tm_indirect_read(struct iwl_testmode *testmode,
@@ -186,8 +211,7 @@ static int iwl_tm_indirect_read(struct iwl_testmode *testmode,
 	mutex_lock(testmode->mutex);
 
 	/* Hard-coded periphery absolute address */
-	if (addr >= IWL_ABS_PRPH_START &&
-	    addr < IWL_ABS_PRPH_START + PRPH_END) {
+	if (iwl_tm_addr_range_prph(testmode, addr)) {
 		if (!iwl_trans_grab_nic_access(trans)) {
 			mutex_unlock(testmode->mutex);
 			return -EBUSY;
@@ -217,8 +241,7 @@ static int iwl_tm_indirect_write(struct iwl_testmode *testmode,
 	u32 val, i;
 
 	mutex_lock(testmode->mutex);
-	if (addr >= IWL_ABS_PRPH_START &&
-	    addr < IWL_ABS_PRPH_START + PRPH_END) {
+	if (iwl_tm_addr_range_prph(testmode, addr)) {
 		/* Periphery writes can be 1-3 bytes long, or DWORDs */
 		if (size < 4) {
 			memcpy(&val, buf, size);

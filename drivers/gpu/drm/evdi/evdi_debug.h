@@ -11,7 +11,6 @@
 
 #include "evdi_params.h"
 
-#define EVDI_LOGLEVEL_ALWAYS  0
 #define EVDI_LOGLEVEL_FATAL   1
 #define EVDI_LOGLEVEL_ERROR   2
 #define EVDI_LOGLEVEL_WARN    3
@@ -53,6 +52,6 @@
 #define EVDI_ENTER() EVDI_VERBOSE("enter\n")
 #define EVDI_EXIT() EVDI_VERBOSE("exit\n")
 
-void evdi_log_process(void);
+void evdi_log_process(char *buf, size_t size);
 
 #endif /* EVDI_DEBUG_H */

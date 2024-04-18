@@ -67,6 +67,10 @@ void rtw_tx_fill_tx_desc(struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
 	SET_TX_DESC_HW_SSN_SEL(txdesc, pkt_info->hw_ssn_sel);
 	SET_TX_DESC_NAVUSEHDR(txdesc, pkt_info->nav_use_hdr);
 	SET_TX_DESC_BT_NULL(txdesc, pkt_info->bt_null);
+	if (pkt_info->tim_offset) {
+		SET_TX_DESC_TIM_EN(txdesc, 1);
+		SET_TX_DESC_TIM_OFFSET(txdesc, pkt_info->tim_offset);
+	}
 }
 EXPORT_SYMBOL(rtw_tx_fill_tx_desc);
 
@@ -311,8 +315,8 @@ static void rtw_tx_data_pkt_info_update(struct rtw_dev *rtwdev,
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
-	struct rtw_dm_info *dm_info = &rtwdev->dm_info;
 	struct ieee80211_hw *hw = rtwdev->hw;
+	struct rtw_dm_info *dm_info = &rtwdev->dm_info;
 	struct rtw_sta_info *si;
 	u8 fix_rate;
 	u16 seq;
@@ -447,6 +451,19 @@ void rtw_tx_rsvd_page_pkt_info_update(struct rtw_dev *rtwdev,
 	}
 	if (type == RSVD_QOS_NULL)
 		pkt_info->bt_null = true;
+
+	if (type == RSVD_BEACON) {
+		struct rtw_rsvd_page *rsvd_pkt;
+		int hdr_len;
+
+		rsvd_pkt = list_first_entry_or_null(&rtwdev->rsvd_page_list,
+						    struct rtw_rsvd_page,
+						    build_list);
+		if (rsvd_pkt && rsvd_pkt->tim_offset != 0) {
+			hdr_len = sizeof(struct ieee80211_hdr_3addr);
+			pkt_info->tim_offset = rsvd_pkt->tim_offset - hdr_len;
+		}
+	}
 
 	rtw_tx_pkt_info_update_sec(rtwdev, pkt_info, skb);
 
@@ -583,33 +600,12 @@ static int rtw_txq_push_skb(struct rtw_dev *rtwdev,
 static struct sk_buff *rtw_txq_dequeue(struct rtw_dev *rtwdev,
 				       struct rtw_txq *rtwtxq)
 {
-	struct rtw_chip_info *chip = rtwdev->chip;
 	struct ieee80211_txq *txq = rtwtxq_to_txq(rtwtxq);
 	struct sk_buff *skb;
-	int headroom_needed;
 
-	do {
-		skb = ieee80211_tx_dequeue(rtwdev->hw, txq);
-		if (!skb)
-			return NULL;
-
-		headroom_needed = chip->tx_pkt_desc_sz - skb_headroom(skb);
-		if (WARN_ONCE(headroom_needed > 0,
-			      "Insufficient headroom (%d bytes, need %d)\n",
-			      skb_headroom(skb), chip->tx_pkt_desc_sz)) {
-			if (skb_cloned(skb)) {
-				netdev_warn(skb->dev, "skb is cloned\n");
-				skb = skb_unshare(skb, GFP_ATOMIC);
-				if (!skb)
-					continue;
-				headroom_needed = chip->tx_pkt_desc_sz - skb_headroom(skb);
-			}
-			if (pskb_expand_head(skb, headroom_needed, 0, GFP_ATOMIC) < 0) {
-				kfree_skb(skb);
-				continue;
-			}
-		}
-	} while (!skb);
+	skb = ieee80211_tx_dequeue(rtwdev->hw, txq);
+	if (!skb)
+		return NULL;
 
 	return skb;
 }
@@ -639,9 +635,8 @@ static void rtw_txq_push(struct rtw_dev *rtwdev,
 	rcu_read_unlock();
 }
 
-void rtw_tx_work(struct work_struct *w)
+void __rtw_tx_work(struct rtw_dev *rtwdev)
 {
-	struct rtw_dev *rtwdev = container_of(w, struct rtw_dev, tx_work);
 	struct rtw_txq *rtwtxq, *tmp;
 
 	spin_lock_bh(&rtwdev->txq_lock);
@@ -660,6 +655,13 @@ void rtw_tx_work(struct work_struct *w)
 	rtw_hci_tx_kick_off(rtwdev);
 
 	spin_unlock_bh(&rtwdev->txq_lock);
+}
+
+void rtw_tx_work(struct work_struct *w)
+{
+	struct rtw_dev *rtwdev = container_of(w, struct rtw_dev, tx_work);
+
+	__rtw_tx_work(rtwdev);
 }
 
 void rtw_txq_init(struct rtw_dev *rtwdev, struct ieee80211_txq *txq)

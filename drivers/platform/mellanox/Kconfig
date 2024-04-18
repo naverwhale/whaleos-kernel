@@ -48,6 +48,7 @@ config MLXBF_BOOTCTL
 	tristate "Mellanox BlueField Firmware Boot Control driver"
 	depends on ARM64
 	depends on ACPI
+	depends on NET
 	help
 	  The Mellanox BlueField firmware implements functionality to
 	  request swapping the primary and alternate eMMC boot partition,
@@ -55,5 +56,15 @@ config MLXBF_BOOTCTL
 	  does not boot up correctly. This driver provides sysfs access
 	  to the userspace tools, to be used in conjunction with the eMMC
 	  device driver to do necessary initial swap of the boot partition.
+
+config MLXBF_PMC
+	tristate "Mellanox BlueField Performance Monitoring Counters driver"
+	depends on ARM64
+	depends on HWMON
+	depends on ACPI
+	help
+	  Say y here to enable PMC support. The PMC driver provides access
+	  to performance monitoring counters within various blocks in the
+	  Mellanox BlueField SoC via a sysfs interface.
 
 endif # MELLANOX_PLATFORM

@@ -41,10 +41,27 @@ KCONFIG_CONFIG
 This environment variable can be used to specify a default kernel config
 file name to override the default name of ".config".
 
+KCONFIG_DEFCONFIG_LIST
+----------------------
+
+This environment variable specifies a list of config files which can be used
+as a base configuration in case the .config does not exist yet. Entries in
+the list are separated with whitespaces to each other, and the first one
+that exists is used.
+
 KCONFIG_OVERWRITECONFIG
 -----------------------
 If you set KCONFIG_OVERWRITECONFIG in the environment, Kconfig will not
 break symlinks when .config is a symlink to somewhere else.
+
+KCONFIG_WARN_UNKNOWN_SYMBOLS
+----------------------------
+This environment variable makes Kconfig warn about all unrecognized
+symbols in the config input.
+
+KCONFIG_WERROR
+--------------
+If set, Kconfig treats warnings as errors.
 
 `CONFIG_`
 ---------

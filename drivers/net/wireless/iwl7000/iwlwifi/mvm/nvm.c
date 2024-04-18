@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2019, 2021 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2019, 2021-2022 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -404,7 +404,7 @@ int iwl_nvm_init(struct iwl_mvm *mvm)
 	return ret < 0 ? ret : 0;
 }
 
-struct iwl_mcc_update_resp *
+struct iwl_mcc_update_resp_v8 *
 iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		   enum iwl_mcc_source src_id)
 {
@@ -412,7 +412,7 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		.mcc = cpu_to_le16(alpha2[0] << 8 | alpha2[1]),
 		.source_id = (u8)src_id,
 	};
-	struct iwl_mcc_update_resp *resp_cp;
+	struct iwl_mcc_update_resp_v8 *resp_cp;
 	struct iwl_rx_packet *pkt;
 	struct iwl_host_cmd cmd = {
 		.id = MCC_UPDATE_CMD,
@@ -420,7 +420,7 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		.data = { &mcc_update_cmd },
 	};
 
-	int ret;
+	int ret, resp_ver;
 	u32 status;
 	int resp_len, n_channels;
 	u16 mcc;
@@ -429,6 +429,13 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		return ERR_PTR(-EOPNOTSUPP);
 
 	cmd.len[0] = sizeof(struct iwl_mcc_update_cmd);
+
+#ifdef CPTCFG_IWLMVM_VENDOR_CMDS
+	if (mvm->trans->trans_cfg->device_family >
+		IWL_DEVICE_FAMILY_9000 &&
+	    src_id == MCC_SOURCE_MCC_API)
+		mcc_update_cmd.key = cpu_to_le32(0xDEADBEE1);
+#endif
 
 	IWL_DEBUG_LAR(mvm, "send MCC update to FW with '%c%c' src = %d\n",
 		      alpha2[0], alpha2[1], src_id);
@@ -439,25 +446,70 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 
 	pkt = cmd.resp_pkt;
 
-	/* Extract MCC response */
-	if (fw_has_capa(&mvm->fw->ucode_capa,
-			IWL_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT)) {
-		struct iwl_mcc_update_resp *mcc_resp = (void *)pkt->data;
+	resp_ver = iwl_fw_lookup_notif_ver(mvm->fw, IWL_ALWAYS_LONG_GROUP,
+					   MCC_UPDATE_CMD, 0);
 
-		n_channels =  __le32_to_cpu(mcc_resp->n_channels);
-		resp_len = sizeof(struct iwl_mcc_update_resp) +
-			   n_channels * sizeof(__le32);
-		resp_cp = kmemdup(mcc_resp, resp_len, GFP_KERNEL);
+	/* Extract MCC response */
+	if (resp_ver >= 8) {
+		struct iwl_mcc_update_resp_v8 *mcc_resp_v8 = (void *)pkt->data;
+
+		n_channels =  __le32_to_cpu(mcc_resp_v8->n_channels);
+		if (iwl_rx_packet_payload_len(pkt) !=
+		    struct_size(mcc_resp_v8, channels, n_channels)) {
+			resp_cp = ERR_PTR(-EINVAL);
+			goto exit;
+		}
+		resp_len = struct_size(resp_cp, channels, n_channels);
+		resp_cp = kzalloc(resp_len, GFP_KERNEL);
 		if (!resp_cp) {
 			resp_cp = ERR_PTR(-ENOMEM);
 			goto exit;
 		}
+		resp_cp->status = mcc_resp_v8->status;
+		resp_cp->mcc = mcc_resp_v8->mcc;
+		resp_cp->cap = mcc_resp_v8->cap;
+		resp_cp->source_id = mcc_resp_v8->source_id;
+		resp_cp->time = mcc_resp_v8->time;
+		resp_cp->geo_info = mcc_resp_v8->geo_info;
+		resp_cp->n_channels = mcc_resp_v8->n_channels;
+		memcpy(resp_cp->channels, mcc_resp_v8->channels,
+		       n_channels * sizeof(__le32));
+	} else if (fw_has_capa(&mvm->fw->ucode_capa,
+			       IWL_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT)) {
+		struct iwl_mcc_update_resp_v4 *mcc_resp_v4 = (void *)pkt->data;
+
+		n_channels =  __le32_to_cpu(mcc_resp_v4->n_channels);
+		if (iwl_rx_packet_payload_len(pkt) !=
+		    struct_size(mcc_resp_v4, channels, n_channels)) {
+			resp_cp = ERR_PTR(-EINVAL);
+			goto exit;
+		}
+		resp_len = struct_size(resp_cp, channels, n_channels);
+		resp_cp = kzalloc(resp_len, GFP_KERNEL);
+		if (!resp_cp) {
+			resp_cp = ERR_PTR(-ENOMEM);
+			goto exit;
+		}
+
+		resp_cp->status = mcc_resp_v4->status;
+		resp_cp->mcc = mcc_resp_v4->mcc;
+		resp_cp->cap = cpu_to_le32(le16_to_cpu(mcc_resp_v4->cap));
+		resp_cp->source_id = mcc_resp_v4->source_id;
+		resp_cp->time = mcc_resp_v4->time;
+		resp_cp->geo_info = mcc_resp_v4->geo_info;
+		resp_cp->n_channels = mcc_resp_v4->n_channels;
+		memcpy(resp_cp->channels, mcc_resp_v4->channels,
+		       n_channels * sizeof(__le32));
 	} else {
 		struct iwl_mcc_update_resp_v3 *mcc_resp_v3 = (void *)pkt->data;
 
 		n_channels =  __le32_to_cpu(mcc_resp_v3->n_channels);
-		resp_len = sizeof(struct iwl_mcc_update_resp) +
-			   n_channels * sizeof(__le32);
+		if (iwl_rx_packet_payload_len(pkt) !=
+		    struct_size(mcc_resp_v3, channels, n_channels)) {
+			resp_cp = ERR_PTR(-EINVAL);
+			goto exit;
+		}
+		resp_len = struct_size(resp_cp, channels, n_channels);
 		resp_cp = kzalloc(resp_len, GFP_KERNEL);
 		if (!resp_cp) {
 			resp_cp = ERR_PTR(-ENOMEM);
@@ -466,7 +518,7 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 
 		resp_cp->status = mcc_resp_v3->status;
 		resp_cp->mcc = mcc_resp_v3->mcc;
-		resp_cp->cap = cpu_to_le16(mcc_resp_v3->cap);
+		resp_cp->cap = cpu_to_le32(mcc_resp_v3->cap);
 		resp_cp->source_id = mcc_resp_v3->source_id;
 		resp_cp->time = mcc_resp_v3->time;
 		resp_cp->geo_info = mcc_resp_v3->geo_info;

@@ -42,7 +42,7 @@
 #include "nv50_display.h"
 
 #include <nvif/class.h>
-#include <nvif/cl0046.h>
+#include <nvif/if0013.h>
 #include <nvif/event.h>
 #include <dispnv50/crc.h>
 
@@ -84,24 +84,20 @@ static bool
 nouveau_display_scanoutpos_head(struct drm_crtc *crtc, int *vpos, int *hpos,
 				ktime_t *stime, ktime_t *etime)
 {
-	struct {
-		struct nv04_disp_mthd_v0 base;
-		struct nv04_disp_scanoutpos_v0 scan;
-	} args = {
-		.base.method = NV04_DISP_SCANOUTPOS,
-		.base.head = nouveau_crtc(crtc)->index,
-	};
-	struct nouveau_display *disp = nouveau_display(crtc->dev);
 	struct drm_vblank_crtc *vblank = &crtc->dev->vblank[drm_crtc_index(crtc)];
+	struct nvif_head *head = &nouveau_crtc(crtc)->head;
+	struct nvif_head_scanoutpos_v0 args;
 	int retry = 20;
 	bool ret = false;
 
+	args.version = 0;
+
 	do {
-		ret = nvif_mthd(&disp->disp.object, 0, &args, sizeof(args));
+		ret = nvif_mthd(&head->object, NVIF_HEAD_V0_SCANOUTPOS, &args, sizeof(args));
 		if (ret != 0)
 			return false;
 
-		if (args.scan.vline) {
+		if (args.vline) {
 			ret = true;
 			break;
 		}
@@ -109,11 +105,10 @@ nouveau_display_scanoutpos_head(struct drm_crtc *crtc, int *vpos, int *hpos,
 		if (retry) ndelay(vblank->linedur_ns);
 	} while (retry--);
 
-	*hpos = args.scan.hline;
-	*vpos = calc(args.scan.vblanks, args.scan.vblanke,
-		     args.scan.vtotal, args.scan.vline);
-	if (stime) *stime = ns_to_ktime(args.scan.time[0]);
-	if (etime) *etime = ns_to_ktime(args.scan.time[1]);
+	*hpos = args.hline;
+	*vpos = calc(args.vblanks, args.vblanke, args.vtotal, args.vline);
+	if (stime) *stime = ns_to_ktime(args.time[0]);
+	if (etime) *etime = ns_to_ktime(args.time[1]);
 
 	return ret;
 }
@@ -306,7 +301,7 @@ nouveau_framebuffer_new(struct drm_device *dev,
 	struct nouveau_bo *nvbo = nouveau_gem_object(gem);
 	struct drm_framebuffer *fb;
 	const struct drm_format_info *info;
-	unsigned int width, height, i;
+	unsigned int height, i;
 	uint32_t tile_mode;
 	uint8_t kind;
 	int ret;
@@ -343,9 +338,6 @@ nouveau_framebuffer_new(struct drm_device *dev,
 	info = drm_get_format_info(dev, mode_cmd);
 
 	for (i = 0; i < info->num_planes; i++) {
-		width = drm_format_info_plane_width(info,
-						    mode_cmd->width,
-						    i);
 		height = drm_format_info_plane_height(info,
 						      mode_cmd->height,
 						      i);
@@ -459,9 +451,9 @@ nouveau_display_hpd_resume(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
 
-	mutex_lock(&drm->hpd_lock);
+	spin_lock_irq(&drm->hpd_lock);
 	drm->hpd_pending = ~0;
-	mutex_unlock(&drm->hpd_lock);
+	spin_unlock_irq(&drm->hpd_lock);
 
 	schedule_work(&drm->hpd_work);
 }
@@ -478,10 +470,10 @@ nouveau_display_hpd_work(struct work_struct *work)
 
 	pm_runtime_get_sync(dev->dev);
 
-	mutex_lock(&drm->hpd_lock);
+	spin_lock_irq(&drm->hpd_lock);
 	pending = drm->hpd_pending;
 	drm->hpd_pending = 0;
-	mutex_unlock(&drm->hpd_lock);
+	spin_unlock_irq(&drm->hpd_lock);
 
 	/* Nothing to do, exit early without updating the last busy counter */
 	if (!pending)
@@ -491,14 +483,30 @@ nouveau_display_hpd_work(struct work_struct *work)
 	drm_connector_list_iter_begin(dev, &conn_iter);
 
 	nouveau_for_each_non_mst_connector_iter(connector, &conn_iter) {
+		struct nouveau_connector *nv_connector = nouveau_connector(connector);
 		enum drm_connector_status old_status = connector->status;
-		u64 old_epoch_counter = connector->epoch_counter;
+		u64 bits, old_epoch_counter = connector->epoch_counter;
 
 		if (!(pending & drm_connector_mask(connector)))
 			continue;
 
-		connector->status = drm_helper_probe_detect(connector, NULL,
-							    false);
+		spin_lock_irq(&drm->hpd_lock);
+		bits = nv_connector->hpd_pending;
+		nv_connector->hpd_pending = 0;
+		spin_unlock_irq(&drm->hpd_lock);
+
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] plug:%d unplug:%d irq:%d\n",
+			    connector->base.id, connector->name,
+			    !!(bits & NVIF_NOTIFY_CONN_V0_PLUG),
+			    !!(bits & NVIF_NOTIFY_CONN_V0_UNPLUG),
+			    !!(bits & NVIF_NOTIFY_CONN_V0_IRQ));
+
+		if (bits & NVIF_NOTIFY_CONN_V0_IRQ) {
+			if (nouveau_dp_link_check(nv_connector))
+				continue;
+		}
+
+		connector->status = drm_helper_probe_detect(connector, NULL, false);
 		if (old_epoch_counter == connector->epoch_counter)
 			continue;
 
@@ -518,7 +526,7 @@ nouveau_display_hpd_work(struct work_struct *work)
 
 	pm_runtime_mark_last_busy(drm->dev->dev);
 noop:
-	pm_runtime_put_sync(drm->dev->dev);
+	pm_runtime_put_autosuspend(dev->dev);
 }
 
 #ifdef CONFIG_ACPI
@@ -540,7 +548,7 @@ nouveau_display_acpi_ntfy(struct notifier_block *nb, unsigned long val,
 				 * it's own hotplug events.
 				 */
 				pm_runtime_put_autosuspend(drm->dev->dev);
-			} else if (ret == 0) {
+			} else if (ret == 0 || ret == -EINPROGRESS) {
 				/* We've started resuming the GPU already, so
 				 * it will handle scheduling a full reprobe
 				 * itself
@@ -711,10 +719,12 @@ nouveau_display_create(struct drm_device *dev)
 				     &disp->disp);
 		if (ret == 0) {
 			nouveau_display_create_properties(dev);
-			if (disp->disp.object.oclass < NV50_DISP)
+			if (disp->disp.object.oclass < NV50_DISP) {
+				dev->mode_config.fb_modifiers_not_supported = true;
 				ret = nv04_display_create(dev);
-			else
+			} else {
 				ret = nv50_display_create(dev);
+			}
 		}
 	} else {
 		ret = 0;
@@ -735,7 +745,7 @@ nouveau_display_create(struct drm_device *dev)
 	}
 
 	INIT_WORK(&drm->hpd_work, nouveau_display_hpd_work);
-	mutex_init(&drm->hpd_lock);
+	spin_lock_init(&drm->hpd_lock);
 #ifdef CONFIG_ACPI
 	drm->acpi_nb.notifier_call = nouveau_display_acpi_ntfy;
 	register_acpi_notifier(&drm->acpi_nb);
@@ -769,8 +779,7 @@ nouveau_display_destroy(struct drm_device *dev)
 
 	nvif_disp_dtor(&disp->disp);
 
-	nouveau_drm(dev)->display = NULL;
-	mutex_destroy(&drm->hpd_lock);
+	drm->display = NULL;
 	kfree(disp);
 }
 

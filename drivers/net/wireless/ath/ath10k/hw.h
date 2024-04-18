@@ -618,13 +618,22 @@ struct ath10k_hw_params {
 	 */
 	bool uart_pin_workaround;
 
+	/* Workaround for the credit size calculation */
+	bool credit_size_workaround;
+
 	/* tx stats support over pktlog */
 	bool tx_stats_over_pktlog;
 
 	/* provides bitrates for sta_statistics using WMI_TLV_PEER_STATS_INFO_EVENTID */
 	bool supports_peer_stats_info;
 
-	u32 start_retry;
+	bool dynamic_sar_support;
+
+	bool hw_restart_disconnect;
+
+	bool use_fw_tx_credits;
+
+	bool delay_unmap_buffer;
 };
 
 struct htt_rx_desc;

@@ -481,6 +481,8 @@ static int ovl_cache_update_ino(struct path *path, struct ovl_cache_entry *p)
 	}
 	this = lookup_one_len(p->name, dir, p->len);
 	if (IS_ERR_OR_NULL(this) || !this->d_inode) {
+		/* Mark a stale entry */
+		p->is_whiteout = true;
 		if (IS_ERR(this)) {
 			err = PTR_ERR(this);
 			this = NULL;
@@ -776,6 +778,9 @@ static int ovl_iterate(struct file *file, struct dir_context *ctx)
 				if (err)
 					goto out;
 			}
+		}
+		/* ovl_cache_update_ino() sets is_whiteout on stale entry */
+		if (!p->is_whiteout) {
 			if (!dir_emit(ctx, p->name, p->len, p->ino, p->type))
 				break;
 		}
@@ -784,7 +789,7 @@ static int ovl_iterate(struct file *file, struct dir_context *ctx)
 	}
 	err = 0;
 out:
-	ovl_revert_creds(dentry->d_sb, old_cred);
+	revert_creds(old_cred);
 	return err;
 }
 
@@ -836,7 +841,7 @@ static struct file *ovl_dir_open_realfile(const struct file *file,
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
 	res = ovl_path_open(realpath, O_RDONLY | (file->f_flags & O_LARGEFILE));
-	ovl_revert_creds(file_inode(file)->i_sb, old_cred);
+	revert_creds(old_cred);
 
 	return res;
 }
@@ -951,10 +956,6 @@ const struct file_operations ovl_dir_operations = {
 	.llseek		= ovl_dir_llseek,
 	.fsync		= ovl_dir_fsync,
 	.release	= ovl_dir_release,
-	.unlocked_ioctl	= ovl_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= ovl_compat_ioctl,
-#endif
 };
 
 int ovl_check_empty_dir(struct dentry *dentry, struct list_head *list)

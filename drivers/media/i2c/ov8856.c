@@ -63,6 +63,7 @@
 #define	OV8856_ANAL_GAIN_STEP		1
 
 /* Digital gain controls from sensor */
+#define OV8856_REG_DIGITAL_GAIN		0x350a
 #define OV8856_REG_MWB_R_GAIN		0x5019
 #define OV8856_REG_MWB_G_GAIN		0x501b
 #define OV8856_REG_MWB_B_GAIN		0x501d
@@ -351,7 +352,7 @@ static const struct ov8856_reg lane_2_mode_3280x2464[] = {
 		{0x484b, 0x05},
 		{0x5000, 0x57},
 		{0x5001, 0x0a},
-		{0x5004, 0x04},
+		{0x5004, 0x06},
 		{0x502e, 0x03},
 		{0x5030, 0x41},
 		{0x5795, 0x02},
@@ -543,7 +544,7 @@ static const struct ov8856_reg lane_2_mode_1640x1232[] = {
 		{0x484b, 0x05},
 		{0x5000, 0x57},
 		{0x5001, 0x0a},
-		{0x5004, 0x04},
+		{0x5004, 0x06},
 		{0x502e, 0x03},
 		{0x5030, 0x41},
 		{0x5795, 0x00},
@@ -734,7 +735,7 @@ static const struct ov8856_reg lane_4_mode_3280x2464[] = {
 		{0x484b, 0x05},
 		{0x5000, 0x57},
 		{0x5001, 0x0a},
-		{0x5004, 0x04},
+		{0x5004, 0x06},
 		{0x502e, 0x03},
 		{0x5030, 0x41},
 		{0x5780, 0x14},
@@ -925,7 +926,7 @@ static const struct ov8856_reg lane_4_mode_1640x1232[] = {
 		{0x484b, 0x05},
 		{0x5000, 0x57},
 		{0x5001, 0x0a},
-		{0x5004, 0x04},
+		{0x5004, 0x06},
 		{0x502e, 0x03},
 		{0x5030, 0x41},
 		{0x5780, 0x14},
@@ -1445,6 +1446,9 @@ struct ov8856 {
 
 	const struct ov8856_lane_cfg *priv_lane;
 	u8 modes_size;
+
+	/* True if the device has been identified */
+	bool identified;
 };
 
 struct ov8856_lane_cfg {
@@ -1685,21 +1689,34 @@ static int ov8856_write_reg_list(struct ov8856 *ov8856,
 	return 0;
 }
 
+static int ov8856_identify_module(struct ov8856 *ov8856)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ov8856->sd);
+	int ret;
+	u32 val;
+
+	if (ov8856->identified)
+		return 0;
+
+	ret = ov8856_read_reg(ov8856, OV8856_REG_CHIP_ID,
+			      OV8856_REG_VALUE_24BIT, &val);
+	if (ret)
+		return ret;
+
+	if (val != OV8856_CHIP_ID) {
+		dev_err(&client->dev, "chip id mismatch: %x!=%x",
+			OV8856_CHIP_ID, val);
+		return -ENXIO;
+	}
+
+	ov8856->identified = true;
+
+	return 0;
+}
+
 static int ov8856_update_digital_gain(struct ov8856 *ov8856, u32 d_gain)
 {
-	int ret;
-
-	ret = ov8856_write_reg(ov8856, OV8856_REG_MWB_R_GAIN,
-			       OV8856_REG_VALUE_16BIT, d_gain);
-	if (ret)
-		return ret;
-
-	ret = ov8856_write_reg(ov8856, OV8856_REG_MWB_G_GAIN,
-			       OV8856_REG_VALUE_16BIT, d_gain);
-	if (ret)
-		return ret;
-
-	return ov8856_write_reg(ov8856, OV8856_REG_MWB_B_GAIN,
+	return ov8856_write_reg(ov8856, OV8856_REG_DIGITAL_GAIN,
 				OV8856_REG_VALUE_16BIT, d_gain);
 }
 
@@ -1969,6 +1986,10 @@ static int ov8856_start_streaming(struct ov8856 *ov8856)
 	const struct ov8856_reg_list *reg_list;
 	int link_freq_index, ret;
 
+	ret = ov8856_identify_module(ov8856);
+	if (ret)
+		return ret;
+
 	link_freq_index = ov8856->cur_mode->link_freq_index;
 	reg_list = &ov8856->priv_lane->link_freq_configs[link_freq_index].reg_list;
 
@@ -2102,8 +2123,7 @@ static void __ov8856_power_off(struct ov8856 *ov8856)
 
 static int __maybe_unused ov8856_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct ov8856 *ov8856 = to_ov8856(sd);
 
 	mutex_lock(&ov8856->mutex);
@@ -2118,8 +2138,7 @@ static int __maybe_unused ov8856_suspend(struct device *dev)
 
 static int __maybe_unused ov8856_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct ov8856 *ov8856 = to_ov8856(sd);
 	int ret;
 
@@ -2142,7 +2161,7 @@ static int __maybe_unused ov8856_resume(struct device *dev)
 }
 
 static int ov8856_set_format(struct v4l2_subdev *sd,
-			     struct v4l2_subdev_pad_config *cfg,
+			     struct v4l2_subdev_state *sd_state,
 			     struct v4l2_subdev_format *fmt)
 {
 	struct ov8856 *ov8856 = to_ov8856(sd);
@@ -2157,7 +2176,7 @@ static int ov8856_set_format(struct v4l2_subdev *sd,
 	mutex_lock(&ov8856->mutex);
 	ov8856_update_pad_format(ov8856, mode, &fmt->format);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		*v4l2_subdev_get_try_format(sd, cfg, fmt->pad) = fmt->format;
+		*v4l2_subdev_get_try_format(sd, sd_state, fmt->pad) = fmt->format;
 	} else {
 		ov8856->cur_mode = mode;
 		__v4l2_ctrl_s_ctrl(ov8856->link_freq, mode->link_freq_index);
@@ -2188,14 +2207,15 @@ static int ov8856_set_format(struct v4l2_subdev *sd,
 }
 
 static int ov8856_get_format(struct v4l2_subdev *sd,
-			     struct v4l2_subdev_pad_config *cfg,
+			     struct v4l2_subdev_state *sd_state,
 			     struct v4l2_subdev_format *fmt)
 {
 	struct ov8856 *ov8856 = to_ov8856(sd);
 
 	mutex_lock(&ov8856->mutex);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt->format = *v4l2_subdev_get_try_format(&ov8856->sd, cfg,
+		fmt->format = *v4l2_subdev_get_try_format(&ov8856->sd,
+							  sd_state,
 							  fmt->pad);
 	else
 		ov8856_update_pad_format(ov8856, ov8856->cur_mode, &fmt->format);
@@ -2206,7 +2226,7 @@ static int ov8856_get_format(struct v4l2_subdev *sd,
 }
 
 static int ov8856_enum_mbus_code(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->index >= ARRAY_SIZE(ov8856_mbus_codes))
@@ -2218,7 +2238,7 @@ static int ov8856_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int ov8856_enum_frame_size(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct ov8856 *ov8856 = to_ov8856(sd);
@@ -2247,7 +2267,7 @@ static int ov8856_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 
 	mutex_lock(&ov8856->mutex);
 	ov8856_update_pad_format(ov8856, &ov8856->priv_lane->supported_modes[0],
-				 v4l2_subdev_get_try_format(sd, fh->pad, 0));
+				 v4l2_subdev_get_try_format(sd, fh->state, 0));
 	mutex_unlock(&ov8856->mutex);
 
 	return 0;
@@ -2277,65 +2297,6 @@ static const struct v4l2_subdev_internal_ops ov8856_internal_ops = {
 	.open = ov8856_open,
 };
 
-static int ov8856_identify_module(struct ov8856 *ov8856)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(&ov8856->sd);
-	int ret;
-	u32 val;
-
-	ret = ov8856_read_reg(ov8856, OV8856_REG_CHIP_ID,
-			      OV8856_REG_VALUE_24BIT, &val);
-	if (ret)
-		return ret;
-
-	if (val != OV8856_CHIP_ID) {
-		dev_err(&client->dev, "chip id mismatch: %x!=%x",
-			OV8856_CHIP_ID, val);
-		return -ENXIO;
-	}
-
-	ret = ov8856_write_reg(ov8856, OV8856_REG_MODE_SELECT,
-			       OV8856_REG_VALUE_08BIT, OV8856_MODE_STREAMING);
-	if (ret)
-		return ret;
-
-	ret = ov8856_write_reg(ov8856, OV8856_OTP_MODE_CTRL,
-			       OV8856_REG_VALUE_08BIT, OV8856_OTP_MODE_AUTO);
-	if (ret) {
-		dev_err(&client->dev, "failed to set otp mode");
-		return ret;
-	}
-
-	ret = ov8856_write_reg(ov8856, OV8856_OTP_LOAD_CTRL,
-			       OV8856_REG_VALUE_08BIT,
-			       OV8856_OTP_LOAD_CTRL_ENABLE);
-	if (ret) {
-		dev_err(&client->dev, "failed to enable load control");
-		return ret;
-	}
-
-	ret = ov8856_read_reg(ov8856, OV8856_MODULE_REVISION,
-			      OV8856_REG_VALUE_08BIT, &val);
-	if (ret) {
-		dev_err(&client->dev, "failed to read module revision");
-		return ret;
-	}
-
-	dev_info(&client->dev, "OV8856 revision %x (%s) at address 0x%02x\n",
-		 val,
-		 val == OV8856_2A_MODULE ? "2A" :
-		 val == OV8856_1B_MODULE ? "1B" : "unknown revision",
-		 client->addr);
-
-	ret = ov8856_write_reg(ov8856, OV8856_REG_MODE_SELECT,
-			       OV8856_REG_VALUE_08BIT, OV8856_MODE_STANDBY);
-	if (ret) {
-		dev_err(&client->dev, "failed to exit streaming mode");
-		return ret;
-	}
-
-	return 0;
-}
 
 static int ov8856_get_hwcfg(struct ov8856 *ov8856, struct device *dev)
 {
@@ -2374,7 +2335,8 @@ static int ov8856_get_hwcfg(struct ov8856 *ov8856, struct device *dev)
 		for (i = 0; i < ARRAY_SIZE(ov8856_supply_names); i++)
 			ov8856->supplies[i].supply = ov8856_supply_names[i];
 
-		ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ov8856_supply_names),
+		ret = devm_regulator_bulk_get(dev,
+					      ARRAY_SIZE(ov8856_supply_names),
 					      ov8856->supplies);
 		if (ret)
 			return ret;
@@ -2458,6 +2420,7 @@ static int ov8856_probe(struct i2c_client *client)
 {
 	struct ov8856 *ov8856;
 	int ret;
+	bool full_power;
 
 	ov8856 = devm_kzalloc(&client->dev, sizeof(*ov8856), GFP_KERNEL);
 	if (!ov8856)
@@ -2472,16 +2435,19 @@ static int ov8856_probe(struct i2c_client *client)
 
 	v4l2_i2c_subdev_init(&ov8856->sd, client, &ov8856_subdev_ops);
 
-	ret = __ov8856_power_on(ov8856);
-	if (ret) {
-		dev_err(&client->dev, "failed to power on\n");
-		return ret;
-	}
+	full_power = acpi_dev_state_d0(&client->dev);
+	if (full_power) {
+		ret = __ov8856_power_on(ov8856);
+		if (ret) {
+			dev_err(&client->dev, "failed to power on\n");
+			return ret;
+		}
 
-	ret = ov8856_identify_module(ov8856);
-	if (ret) {
-		dev_err(&client->dev, "failed to find sensor: %d", ret);
-		goto probe_power_off;
+		ret = ov8856_identify_module(ov8856);
+		if (ret) {
+			dev_err(&client->dev, "failed to find sensor: %d", ret);
+			goto probe_power_off;
+		}
 	}
 
 	mutex_init(&ov8856->mutex);
@@ -2504,18 +2470,16 @@ static int ov8856_probe(struct i2c_client *client)
 		goto probe_error_v4l2_ctrl_handler_free;
 	}
 
-	ret = v4l2_async_register_subdev_sensor_common(&ov8856->sd);
+	ret = v4l2_async_register_subdev_sensor(&ov8856->sd);
 	if (ret < 0) {
 		dev_err(&client->dev, "failed to register V4L2 subdev: %d",
 			ret);
 		goto probe_error_media_entity_cleanup;
 	}
 
-	/*
-	 * Device is already turned on by i2c-core with ACPI domain PM.
-	 * Enable runtime PM and turn off the device.
-	 */
-	pm_runtime_set_active(&client->dev);
+	/* Set the device's state to active if it's in D0 state. */
+	if (full_power)
+		pm_runtime_set_active(&client->dev);
 	pm_runtime_enable(&client->dev);
 	pm_runtime_idle(&client->dev);
 
@@ -2562,6 +2526,7 @@ static struct i2c_driver ov8856_i2c_driver = {
 	},
 	.probe_new = ov8856_probe,
 	.remove = ov8856_remove,
+	.flags = I2C_DRV_ACPI_WAIVE_D0_PROBE,
 };
 
 module_i2c_driver(ov8856_i2c_driver);

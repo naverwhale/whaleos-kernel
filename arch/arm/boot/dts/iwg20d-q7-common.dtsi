@@ -49,7 +49,7 @@
 	lcd_backlight: backlight {
 		compatible = "pwm-backlight";
 
-		pwms = <&pwm3 0 5000000 0>;
+		pwms = <&pwm3 0 5000000>;
 		brightness-levels = <0 4 8 16 32 64 128 255>;
 		default-brightness-level = <7>;
 		enable-gpios = <&gpio5 14 GPIO_ACTIVE_HIGH>;
@@ -325,8 +325,8 @@
 
 	rcar_sound,dai {
 		dai0 {
-			playback = <&ssi1 &src3 &dvc1>;
-			capture = <&ssi0 &src2 &dvc0>;
+			playback = <&ssi1>, <&src3>, <&dvc1>;
+			capture = <&ssi0>, <&src2>, <&dvc0>;
 		};
 	};
 };

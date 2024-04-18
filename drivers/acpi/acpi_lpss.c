@@ -186,13 +186,12 @@ static void byt_i2c_setup(struct lpss_private_data *pdata)
 	long uid = 0;
 
 	/* Expected to always be true, but better safe then sorry */
-	if (uid_str)
-		uid = simple_strtol(uid_str, NULL, 10);
-
-	/* Detect I2C bus shared with PUNIT and ignore its d3 status */
-	status = acpi_evaluate_integer(handle, "_SEM", NULL, &shared_host);
-	if (ACPI_SUCCESS(status) && shared_host && uid)
-		pmc_atom_d3_mask &= ~(BIT_LPSS2_F1_I2C1 << (uid - 1));
+	if (uid_str && !kstrtol(uid_str, 10, &uid) && uid) {
+		/* Detect I2C bus shared with PUNIT and ignore its d3 status */
+		status = acpi_evaluate_integer(handle, "_SEM", NULL, &shared_host);
+		if (ACPI_SUCCESS(status) && shared_host)
+			pmc_atom_d3_mask &= ~(BIT_LPSS2_F1_I2C1 << (uid - 1));
+	}
 
 	lpss_deassert_reset(pdata);
 
@@ -374,18 +373,14 @@ static const struct acpi_device_id acpi_lpss_device_ids[] = {
 
 #ifdef CONFIG_X86_INTEL_LPSS
 
-static int is_memory(struct acpi_resource *res, void *not_used)
-{
-	struct resource r;
-	return !acpi_dev_resource_memory(res, &r);
-}
-
 /* LPSS main clock device. */
 static struct platform_device *lpss_clk_dev;
 
 static inline void lpt_register_clock_device(void)
 {
-	lpss_clk_dev = platform_device_register_simple("clk-lpt", -1, NULL, 0);
+	lpss_clk_dev = platform_device_register_simple("clk-lpss-atom",
+						       PLATFORM_DEVID_NONE,
+						       NULL, 0);
 }
 
 static int register_device_clock(struct acpi_device *adev,
@@ -400,6 +395,9 @@ static int register_device_clock(struct acpi_device *adev,
 
 	if (!lpss_clk_dev)
 		lpt_register_clock_device();
+
+	if (IS_ERR(lpss_clk_dev))
+		return PTR_ERR(lpss_clk_dev);
 
 	clk_data = platform_get_drvdata(lpss_clk_dev);
 	if (!clk_data)
@@ -434,8 +432,8 @@ static int register_device_clock(struct acpi_device *adev,
 		if (!clk_name)
 			return -ENOMEM;
 		clk = clk_register_fractional_divider(NULL, clk_name, parent,
-						      0, prv_base,
-						      1, 15, 16, 15, 0, NULL);
+						      CLK_FRAC_DIVIDER_POWER_OF_TWO_PS,
+						      prv_base, 1, 15, 16, 15, 0, NULL);
 		parent = clk_name;
 
 		clk_name = kasprintf(GFP_KERNEL, "%s-update", devname);
@@ -635,7 +633,7 @@ static int acpi_lpss_create_device(struct acpi_device *adev,
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&resource_list);
-	ret = acpi_dev_get_resources(adev, &resource_list, is_memory, NULL);
+	ret = acpi_dev_get_memory_resources(adev, &resource_list);
 	if (ret < 0)
 		goto err_out;
 
@@ -1200,6 +1198,7 @@ static int acpi_lpss_poweroff_noirq(struct device *dev)
 	if (pdata->dev_desc->resume_from_noirq) {
 		/* This is analogous to the acpi_lpss_suspend_noirq() case. */
 		int ret = acpi_lpss_do_poweroff_late(dev);
+
 		if (ret)
 			return ret;
 	}
@@ -1336,7 +1335,7 @@ void __init acpi_lpss_init(void)
 	const struct x86_cpu_id *id;
 	int ret;
 
-	ret = lpt_clk_init();
+	ret = lpss_atom_clk_init();
 	if (ret)
 		return;
 

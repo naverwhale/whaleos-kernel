@@ -130,7 +130,6 @@ static const struct genpd_lock_ops genpd_spin_ops = {
 #define genpd_is_active_wakeup(genpd)	(genpd->flags & GENPD_FLAG_ACTIVE_WAKEUP)
 #define genpd_is_cpu_domain(genpd)	(genpd->flags & GENPD_FLAG_CPU_DOMAIN)
 #define genpd_is_rpm_always_on(genpd)	(genpd->flags & GENPD_FLAG_RPM_ALWAYS_ON)
-#define genpd_is_suspend_on(genpd)	(genpd->flags & GENPD_FLAG_SUSPEND_ON)
 
 static inline bool irq_safe_dev_in_no_sleep_domain(struct device *dev,
 		const struct generic_pm_domain *genpd)
@@ -218,10 +217,10 @@ static void genpd_debug_add(struct generic_pm_domain *genpd);
 
 static void genpd_debug_remove(struct generic_pm_domain *genpd)
 {
-	struct dentry *d;
+	if (!genpd_debugfs_dir)
+		return;
 
-	d = debugfs_lookup(genpd->name, genpd_debugfs_dir);
-	debugfs_remove(d);
+	debugfs_lookup_and_remove(genpd->name, genpd_debugfs_dir);
 }
 
 static void genpd_update_accounting(struct generic_pm_domain *genpd)
@@ -489,6 +488,31 @@ void dev_pm_genpd_set_next_wakeup(struct device *dev, ktime_t next)
 }
 EXPORT_SYMBOL_GPL(dev_pm_genpd_set_next_wakeup);
 
+/*
+ * dev_pm_genpd_synced_poweroff - Next power off should be synchronous
+ *
+ * @dev: A device that is attached to the genpd.
+ *
+ * Allows a consumer of the genpd to notify the provider that the next power off
+ * should be synchronous.
+ *
+ * It is assumed that the users guarantee that the genpd wouldn't be detached
+ * while this routine is getting called.
+ */
+void dev_pm_genpd_synced_poweroff(struct device *dev)
+{
+	struct generic_pm_domain *genpd;
+
+	genpd = dev_to_genpd_safe(dev);
+	if (!genpd)
+		return;
+
+	genpd_lock(genpd);
+	genpd->synced_poweroff = true;
+	genpd_unlock(genpd);
+}
+EXPORT_SYMBOL_GPL(dev_pm_genpd_synced_poweroff);
+
 static int _genpd_power_on(struct generic_pm_domain *genpd, bool timed)
 {
 	unsigned int state_idx = genpd->state_idx;
@@ -531,6 +555,7 @@ static int _genpd_power_on(struct generic_pm_domain *genpd, bool timed)
 
 out:
 	raw_notifier_call_chain(&genpd->power_notifiers, GENPD_NOTIFY_ON, NULL);
+	genpd->synced_poweroff = false;
 	return 0;
 err:
 	raw_notifier_call_chain(&genpd->power_notifiers, GENPD_NOTIFY_OFF,
@@ -1067,7 +1092,7 @@ static void genpd_sync_power_off(struct generic_pm_domain *genpd, bool use_lock,
 {
 	struct gpd_link *link;
 
-	if (!genpd_status_on(genpd) || genpd_is_always_on(genpd) || genpd_is_suspend_on(genpd))
+	if (!genpd_status_on(genpd) || genpd_is_always_on(genpd))
 		return;
 
 	if (genpd->suspended_count != genpd->device_count
@@ -1193,7 +1218,7 @@ static int genpd_finish_suspend(struct device *dev, bool poweroff)
 	if (ret)
 		return ret;
 
-	if (dev->power.wakeup_path && genpd_is_active_wakeup(genpd))
+	if (device_wakeup_path(dev) && genpd_is_active_wakeup(genpd))
 		return 0;
 
 	if (genpd->dev_ops.stop && genpd->dev_ops.start &&
@@ -1247,7 +1272,7 @@ static int genpd_resume_noirq(struct device *dev)
 	if (IS_ERR(genpd))
 		return -EINVAL;
 
-	if (dev->power.wakeup_path && genpd_is_active_wakeup(genpd))
+	if (device_wakeup_path(dev) && genpd_is_active_wakeup(genpd))
 		return pm_generic_resume_noirq(dev);
 
 	genpd_lock(genpd);
@@ -1414,41 +1439,60 @@ static void genpd_complete(struct device *dev)
 	genpd_unlock(genpd);
 }
 
-/**
- * genpd_syscore_switch - Switch power during system core suspend or resume.
- * @dev: Device that normally is marked as "always on" to switch power for.
- *
- * This routine may only be called during the system core (syscore) suspend or
- * resume phase for devices whose "always on" flags are set.
- */
-static void genpd_syscore_switch(struct device *dev, bool suspend)
+static void genpd_switch_state(struct device *dev, bool suspend)
 {
 	struct generic_pm_domain *genpd;
+	bool use_lock;
 
 	genpd = dev_to_genpd_safe(dev);
 	if (!genpd)
 		return;
 
+	use_lock = genpd_is_irq_safe(genpd);
+
+	if (use_lock)
+		genpd_lock(genpd);
+
 	if (suspend) {
 		genpd->suspended_count++;
-		genpd_sync_power_off(genpd, false, 0);
+		genpd_sync_power_off(genpd, use_lock, 0);
 	} else {
-		genpd_sync_power_on(genpd, false, 0);
+		genpd_sync_power_on(genpd, use_lock, 0);
 		genpd->suspended_count--;
 	}
+
+	if (use_lock)
+		genpd_unlock(genpd);
 }
 
-void pm_genpd_syscore_poweroff(struct device *dev)
+/**
+ * dev_pm_genpd_suspend - Synchronously try to suspend the genpd for @dev
+ * @dev: The device that is attached to the genpd, that can be suspended.
+ *
+ * This routine should typically be called for a device that needs to be
+ * suspended during the syscore suspend phase. It may also be called during
+ * suspend-to-idle to suspend a corresponding CPU device that is attached to a
+ * genpd.
+ */
+void dev_pm_genpd_suspend(struct device *dev)
 {
-	genpd_syscore_switch(dev, true);
+	genpd_switch_state(dev, true);
 }
-EXPORT_SYMBOL_GPL(pm_genpd_syscore_poweroff);
+EXPORT_SYMBOL_GPL(dev_pm_genpd_suspend);
 
-void pm_genpd_syscore_poweron(struct device *dev)
+/**
+ * dev_pm_genpd_resume - Synchronously try to resume the genpd for @dev
+ * @dev: The device that is attached to the genpd, which needs to be resumed.
+ *
+ * This routine should typically be called for a device that needs to be resumed
+ * during the syscore resume phase. It may also be called during suspend-to-idle
+ * to resume a corresponding CPU device that is attached to a genpd.
+ */
+void dev_pm_genpd_resume(struct device *dev)
 {
-	genpd_syscore_switch(dev, false);
+	genpd_switch_state(dev, false);
 }
-EXPORT_SYMBOL_GPL(pm_genpd_syscore_poweron);
+EXPORT_SYMBOL_GPL(dev_pm_genpd_resume);
 
 #else /* !CONFIG_PM_SLEEP */
 
@@ -1960,6 +2004,7 @@ int pm_genpd_init(struct generic_pm_domain *genpd,
 	genpd->device_count = 0;
 	genpd->max_off_time_ns = -1;
 	genpd->max_off_time_changed = true;
+	genpd->next_wakeup = KTIME_MAX;
 	genpd->provider = NULL;
 	genpd->has_provider = false;
 	genpd->accounting_time = ktime_get();
@@ -2040,9 +2085,9 @@ static int genpd_remove(struct generic_pm_domain *genpd)
 		kfree(link);
 	}
 
-	genpd_debug_remove(genpd);
 	list_del(&genpd->gpd_list_node);
 	genpd_unlock(genpd);
+	genpd_debug_remove(genpd);
 	cancel_work_sync(&genpd->power_off_work);
 	if (genpd_is_cpu_domain(genpd))
 		free_cpumask_var(genpd->cpus);
@@ -2182,6 +2227,7 @@ static int genpd_add_provider(struct device_node *np, genpd_xlate_t xlate,
 	cp->node = of_node_get(np);
 	cp->data = data;
 	cp->xlate = xlate;
+	fwnode_dev_initialized(&np->fwnode, true);
 
 	mutex_lock(&of_genpd_mutex);
 	list_add(&cp->link, &of_genpd_providers);
@@ -2367,6 +2413,7 @@ void of_genpd_del_provider(struct device_node *np)
 				}
 			}
 
+			fwnode_dev_initialized(&cp->node->fwnode, false);
 			list_del(&cp->link);
 			of_node_put(cp->node);
 			kfree(cp);
@@ -2839,10 +2886,10 @@ static int genpd_parse_state(struct genpd_power_state *genpd_state,
 
 	err = of_property_read_u32(state_node, "min-residency-us", &residency);
 	if (!err)
-		genpd_state->residency_ns = 1000 * residency;
+		genpd_state->residency_ns = 1000LL * residency;
 
-	genpd_state->power_on_latency_ns = 1000 * exit_latency;
-	genpd_state->power_off_latency_ns = 1000 * entry_latency;
+	genpd_state->power_on_latency_ns = 1000LL * exit_latency;
+	genpd_state->power_off_latency_ns = 1000LL * entry_latency;
 	genpd_state->fwnode = &state_node->fwnode;
 
 	return 0;
@@ -2865,6 +2912,10 @@ static int genpd_iterate_idle_states(struct device_node *dn,
 		np = it.node;
 		if (!of_match_node(idle_state_match, np))
 			continue;
+
+		if (!of_device_is_available(np))
+			continue;
+
 		if (states) {
 			ret = genpd_parse_state(&states[i], np);
 			if (ret) {

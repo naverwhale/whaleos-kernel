@@ -19,43 +19,19 @@
 #define kstrtobool __iwl7000_kstrtobool
 #define kstrtobool_from_user __iwl7000_kstrtobool_from_user
 #endif /* < 4.6.0 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-#ifdef CONFIG_DEBUG_FS
-#define iwl_debugfs_create_bool __iwl7000_iwl_debugfs_create_bool
-#endif /* CONFIG_DEBUG_FS */
-#define tso_count_descs __iwl7000_tso_count_descs
-#define tso_build_hdr __iwl7000_tso_build_hdr
-#define tso_build_data __iwl7000_tso_build_data
-#define tso_start __iwl7000_tso_start
-#define match_string __iwl7000_match_string
-#endif /* < 4.4.0 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-#define netdev_rss_key_fill __iwl7000_netdev_rss_key_fill
-#endif /* < 3.19.0 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 17, 0)
-#define devm_kvasprintf __iwl7000_devm_kvasprintf
-#define devm_kasprintf __iwl7000_devm_kasprintf
-#endif /* < 3.17 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0)
-#define __backport_genl_register_family __iwl7000___backport_genl_register_family
-#define backport_genl_unregister_family __iwl7000_backport_genl_unregister_family
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
-#define sg_pcopy_from_buffer __iwl7000_sg_pcopy_from_buffer
-#define sg_pcopy_to_buffer __iwl7000_sg_pcopy_to_buffer
-#endif /* < 3.11 */
-#define __alloc_bucket_spinlocks __iwl7000___alloc_bucket_spinlocks
-#define free_bucket_spinlocks __iwl7000_free_bucket_spinlocks
-#if CFG80211_VERSION < KERNEL_VERSION(4,1,0)
-#define ieee80211_ie_split_ric __iwl7000_ieee80211_ie_split_ric
-#define ieee80211_ie_split __iwl7000_ieee80211_ie_split
-#endif
 #if CFG80211_VERSION < KERNEL_VERSION(5,6,0)
 #define ieee80211_get_vht_max_nss __iwl7000_ieee80211_get_vht_max_nss
 #endif
+#if CFG80211_VERSION < KERNEL_VERSION(6,4,0)
+#define cfg80211_defragment_element __iwl7000_cfg80211_defragment_element
+#define ieee80211_fragment_element __iwl7000_ieee80211_fragment_element
+#endif
 #define ieee80211_csa_finish __iwl7000_ieee80211_csa_finish
+#define ieee80211_channel_switch_disconnect __iwl7000_ieee80211_channel_switch_disconnect
 #define ieee80211_nan_func_terminated __iwl7000_ieee80211_nan_func_terminated
 #define ieee80211_nan_func_match __iwl7000_ieee80211_nan_func_match
+#define ieee80211_color_change_finish __iwl7000_ieee80211_color_change_finish
+#define ieeee80211_obss_color_collision_notify __iwl7000_ieeee80211_obss_color_collision_notify
 #define ieee80211_iter_chan_contexts_atomic __iwl7000_ieee80211_iter_chan_contexts_atomic
 #define ieee80211_request_smps __iwl7000_ieee80211_request_smps
 #define ieee80211_iter_keys __iwl7000_ieee80211_iter_keys
@@ -72,6 +48,8 @@
 #define __ieee80211_get_tx_led_name __iwl7000___ieee80211_get_tx_led_name
 #define __ieee80211_get_rx_led_name __iwl7000___ieee80211_get_rx_led_name
 #define __ieee80211_create_tpt_led_trigger __iwl7000___ieee80211_create_tpt_led_trigger
+#define ieee80211_set_active_links __iwl7000_ieee80211_set_active_links
+#define ieee80211_set_active_links_async __iwl7000_ieee80211_set_active_links_async
 #define ieee80211_restart_hw __iwl7000_ieee80211_restart_hw
 #define ieee80211_alloc_hw_nm __iwl7000_ieee80211_alloc_hw_nm
 #define ieee80211_register_hw __iwl7000_ieee80211_register_hw
@@ -84,6 +62,8 @@
 #define ieee80211_disconnect __iwl7000_ieee80211_disconnect
 #define ieee80211_cqm_rssi_notify __iwl7000_ieee80211_cqm_rssi_notify
 #define ieee80211_cqm_beacon_loss_notify __iwl7000_ieee80211_cqm_beacon_loss_notify
+#define ieee80211_enable_rssi_reports __iwl7000_ieee80211_enable_rssi_reports
+#define ieee80211_disable_rssi_reports __iwl7000_ieee80211_disable_rssi_reports
 #define ieee80211_ready_on_channel __iwl7000_ieee80211_ready_on_channel
 #define ieee80211_remain_on_channel_expired __iwl7000_ieee80211_remain_on_channel_expired
 #define ieee80211_report_wowlan_wakeup __iwl7000_ieee80211_report_wowlan_wakeup
@@ -91,28 +71,6 @@
 #define ieee80211_rate_control_unregister __iwl7000_ieee80211_rate_control_unregister
 #define ieee80211_get_tx_rates __iwl7000_ieee80211_get_tx_rates
 #define rate_control_set_rates __iwl7000_rate_control_set_rates
-#if CFG80211_VERSION < KERNEL_VERSION(4,0,0)
-#define regulatory_set_wiphy_regd __iwl7000_regulatory_set_wiphy_regd
-#define regulatory_set_wiphy_regd_sync_rtnl __iwl7000_regulatory_set_wiphy_regd_sync_rtnl
-#endif /* CFG80211_VERSION < KERNEL_VERSION(4,0,0) */
-#ifdef CONFIG_PROVE_LOCKING
-#define lockdep_rht_mutex_is_held __iwl7000_lockdep_rht_mutex_is_held
-#define lockdep_rht_bucket_is_held __iwl7000_lockdep_rht_bucket_is_held
-#endif
-#define rhashtable_insert_slow __iwl7000_rhashtable_insert_slow
-#define rhashtable_walk_enter __iwl7000_rhashtable_walk_enter
-#define rhashtable_walk_exit __iwl7000_rhashtable_walk_exit
-#define rhashtable_walk_start_check __iwl7000_rhashtable_walk_start_check
-#define rhashtable_walk_next __iwl7000_rhashtable_walk_next
-#define rhashtable_walk_peek __iwl7000_rhashtable_walk_peek
-#define rhashtable_walk_stop __iwl7000_rhashtable_walk_stop
-#define rhashtable_init __iwl7000_rhashtable_init
-#define rhltable_init __iwl7000_rhltable_init
-#define rhashtable_free_and_destroy __iwl7000_rhashtable_free_and_destroy
-#define rhashtable_destroy __iwl7000_rhashtable_destroy
-#define __rht_bucket_nested __iwl7000___rht_bucket_nested
-#define rht_bucket_nested __iwl7000_rht_bucket_nested
-#define rht_bucket_nested_insert __iwl7000_rht_bucket_nested_insert
 #define ieee80211_sta_ps_transition __iwl7000_ieee80211_sta_ps_transition
 #define ieee80211_sta_pspoll __iwl7000_ieee80211_sta_pspoll
 #define ieee80211_sta_uapsd_trigger __iwl7000_ieee80211_sta_uapsd_trigger
@@ -123,6 +81,7 @@
 #define ieee80211_scan_completed __iwl7000_ieee80211_scan_completed
 #define ieee80211_sched_scan_results __iwl7000_ieee80211_sched_scan_results
 #define ieee80211_sched_scan_stopped __iwl7000_ieee80211_sched_scan_stopped
+#define ieee80211_find_sta_by_link_addrs __iwl7000_ieee80211_find_sta_by_link_addrs
 #define ieee80211_find_sta_by_ifaddr __iwl7000_ieee80211_find_sta_by_ifaddr
 #define ieee80211_find_sta __iwl7000_ieee80211_find_sta
 #define ieee80211_sta_block_awake __iwl7000_ieee80211_sta_block_awake
@@ -130,6 +89,10 @@
 #define ieee80211_send_eosp_nullfunc __iwl7000_ieee80211_send_eosp_nullfunc
 #define ieee80211_sta_set_buffered __iwl7000_ieee80211_sta_set_buffered
 #define ieee80211_sta_register_airtime __iwl7000_ieee80211_sta_register_airtime
+#define ieee80211_sta_recalc_aggregates __iwl7000_ieee80211_sta_recalc_aggregates
+#ifdef CONFIG_LOCKDEP
+#define lockdep_sta_mutex_held __iwl7000_lockdep_sta_mutex_held
+#endif
 #define ieee80211_tx_status_irqsafe __iwl7000_ieee80211_tx_status_irqsafe
 #define ieee80211_tx_status __iwl7000_ieee80211_tx_status
 #define ieee80211_tx_status_ext __iwl7000_ieee80211_tx_status_ext
@@ -170,6 +133,7 @@
 #define ieee80211_generic_frame_duration __iwl7000_ieee80211_generic_frame_duration
 #define ieee80211_rts_duration __iwl7000_ieee80211_rts_duration
 #define ieee80211_ctstoself_duration __iwl7000_ieee80211_ctstoself_duration
+#define ieee80211_handle_wake_tx_queue __iwl7000_ieee80211_handle_wake_tx_queue
 #define ieee80211_wake_queue __iwl7000_ieee80211_wake_queue
 #define ieee80211_stop_queue __iwl7000_ieee80211_stop_queue
 #define ieee80211_stop_queues __iwl7000_ieee80211_stop_queues
@@ -178,14 +142,14 @@
 #define ieee80211_iterate_interfaces __iwl7000_ieee80211_iterate_interfaces
 #define ieee80211_iterate_active_interfaces_atomic __iwl7000_ieee80211_iterate_active_interfaces_atomic
 #define ieee80211_iterate_active_interfaces_mtx __iwl7000_ieee80211_iterate_active_interfaces_mtx
+#define ieee80211_iterate_stations __iwl7000_ieee80211_iterate_stations
 #define ieee80211_iterate_stations_atomic __iwl7000_ieee80211_iterate_stations_atomic
 #define wdev_to_ieee80211_vif __iwl7000_wdev_to_ieee80211_vif
 #define ieee80211_vif_to_wdev __iwl7000_ieee80211_vif_to_wdev
 #define ieee80211_queue_work __iwl7000_ieee80211_queue_work
 #define ieee80211_queue_delayed_work __iwl7000_ieee80211_queue_delayed_work
+#define ieee80211_hw_restart_disconnect __iwl7000_ieee80211_hw_restart_disconnect
 #define ieee80211_resume_disconnect __iwl7000_ieee80211_resume_disconnect
-#define ieee80211_enable_rssi_reports __iwl7000_ieee80211_enable_rssi_reports
-#define ieee80211_disable_rssi_reports __iwl7000_ieee80211_disable_rssi_reports
 #define ieee80211_ave_rssi __iwl7000_ieee80211_ave_rssi
 #define ieee80211_radar_detected __iwl7000_ieee80211_radar_detected
 #define ieee80211_update_p2p_noa __iwl7000_ieee80211_update_p2p_noa

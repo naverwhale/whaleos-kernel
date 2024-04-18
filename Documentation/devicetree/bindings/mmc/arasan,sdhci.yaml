@@ -112,6 +112,9 @@ properties:
   phy-names:
     const: phy_arasan
 
+  resets:
+    maxItems: 1
+
   arasan,soc-ctl-syscon:
     $ref: /schemas/types.yaml#/definitions/phandle
     description:
@@ -147,7 +150,7 @@ properties:
 
   xlnx,mio-bank:
     $ref: /schemas/types.yaml#/definitions/uint32
-    enum: [0, 2]
+    enum: [0, 1, 2]
     default: 0
     description:
       The MIO bank number in which the command and data lines are configured.

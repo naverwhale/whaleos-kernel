@@ -61,7 +61,7 @@ struct fw_page {
 	u32			function;
 	unsigned long		bitmask;
 	struct list_head	list;
-	unsigned		free_count;
+	unsigned int free_count;
 };
 
 enum {
@@ -216,7 +216,8 @@ static int alloc_4k(struct mlx5_core_dev *dev, u64 *addr, u32 function)
 
 	n = find_first_bit(&fp->bitmask, 8 * sizeof(fp->bitmask));
 	if (n >= MLX5_NUM_4K_IN_PAGE) {
-		mlx5_core_warn(dev, "alloc 4k bug\n");
+		mlx5_core_warn(dev, "alloc 4k bug: fw page = 0x%llx, n = %u, bitmask: %lu, max num of 4K pages: %d\n",
+			       fp->addr, n, fp->bitmask,  MLX5_NUM_4K_IN_PAGE);
 		return -ENOENT;
 	}
 	clear_bit(n, &fp->bitmask);
@@ -380,7 +381,7 @@ retry:
 	if (func_id)
 		dev->priv.vfs_pages += npages;
 	else if (mlx5_core_is_ecpf(dev) && !ec_function)
-		dev->priv.peer_pf_pages += npages;
+		dev->priv.host_pf_pages += npages;
 
 	mlx5_core_dbg(dev, "npages %d, ec_function %d, func_id 0x%x, err %d\n",
 		      npages, ec_function, func_id, err);
@@ -423,7 +424,7 @@ static void release_all_pages(struct mlx5_core_dev *dev, u16 func_id,
 	if (func_id)
 		dev->priv.vfs_pages -= npages;
 	else if (mlx5_core_is_ecpf(dev) && !ec_function)
-		dev->priv.peer_pf_pages -= npages;
+		dev->priv.host_pf_pages -= npages;
 
 	mlx5_core_dbg(dev, "npages %d, ec_function %d, func_id 0x%x\n",
 		      npages, ec_function, func_id);
@@ -533,7 +534,7 @@ static int reclaim_pages(struct mlx5_core_dev *dev, u16 func_id, int npages,
 	if (func_id)
 		dev->priv.vfs_pages -= num_claimed;
 	else if (mlx5_core_is_ecpf(dev) && !ec_function)
-		dev->priv.peer_pf_pages -= num_claimed;
+		dev->priv.host_pf_pages -= num_claimed;
 
 out_free:
 	kvfree(out);
@@ -688,9 +689,9 @@ int mlx5_reclaim_startup_pages(struct mlx5_core_dev *dev)
 	WARN(dev->priv.vfs_pages,
 	     "VFs FW pages counter is %d after reclaiming all pages\n",
 	     dev->priv.vfs_pages);
-	WARN(dev->priv.peer_pf_pages,
-	     "Peer PF FW pages counter is %d after reclaiming all pages\n",
-	     dev->priv.peer_pf_pages);
+	WARN(dev->priv.host_pf_pages,
+	     "External host PF FW pages counter is %d after reclaiming all pages\n",
+	     dev->priv.host_pf_pages);
 
 	return 0;
 }

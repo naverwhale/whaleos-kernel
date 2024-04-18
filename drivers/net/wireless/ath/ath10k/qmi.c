@@ -14,6 +14,7 @@
 #include <linux/net.h>
 #include <linux/platform_device.h>
 #include <linux/qcom_scm.h>
+#include <linux/soc/qcom/smem.h>
 #include <linux/string.h>
 #include <net/sock.h>
 
@@ -22,6 +23,10 @@
 
 #define ATH10K_QMI_CLIENT_ID		0x4b4e454c
 #define ATH10K_QMI_TIMEOUT		30
+#define SMEM_IMAGE_VERSION_TABLE       469
+#define SMEM_IMAGE_TABLE_CNSS_INDEX     13
+#define SMEM_IMAGE_VERSION_ENTRY_SIZE	128
+#define SMEM_IMAGE_VERSION_NAME_SIZE	75
 
 static int ath10k_qmi_map_msa_permission(struct ath10k_qmi *qmi,
 					 struct ath10k_msa_mem_info *mem_info)
@@ -536,6 +541,33 @@ int ath10k_qmi_wlan_disable(struct ath10k *ar)
 	return ath10k_qmi_mode_send_sync_msg(ar, QMI_WLFW_OFF_V01);
 }
 
+static void ath10k_qmi_add_wlan_ver_smem(struct ath10k *ar, const char *fw_build_id)
+{
+	u8 *table_ptr;
+	size_t smem_item_size;
+	const u32 smem_img_idx_wlan = SMEM_IMAGE_TABLE_CNSS_INDEX *
+				      SMEM_IMAGE_VERSION_ENTRY_SIZE;
+
+	table_ptr = qcom_smem_get(QCOM_SMEM_HOST_ANY,
+				  SMEM_IMAGE_VERSION_TABLE,
+				  &smem_item_size);
+
+	if (IS_ERR(table_ptr)) {
+		ath10k_err(ar, "smem image version table not found\n");
+		return;
+	}
+
+	if (smem_img_idx_wlan + SMEM_IMAGE_VERSION_ENTRY_SIZE >
+	    smem_item_size) {
+		ath10k_err(ar, "smem block size too small: %zu\n",
+			   smem_item_size);
+		return;
+	}
+
+	strscpy(table_ptr + smem_img_idx_wlan, fw_build_id,
+		SMEM_IMAGE_VERSION_NAME_SIZE);
+}
+
 static int ath10k_qmi_cap_send_sync_msg(struct ath10k_qmi *qmi)
 {
 	struct wlfw_cap_resp_msg_v01 *resp;
@@ -605,6 +637,9 @@ static int ath10k_qmi_cap_send_sync_msg(struct ath10k_qmi *qmi)
 		ath10k_info(ar, "qmi fw_version 0x%x fw_build_timestamp %s fw_build_id %s",
 			    qmi->fw_version, qmi->fw_build_timestamp, qmi->fw_build_id);
 	}
+
+	if (resp->fw_build_id_valid)
+		ath10k_qmi_add_wlan_ver_smem(ar, qmi->fw_build_id);
 
 	kfree(resp);
 	return 0;
@@ -918,7 +953,7 @@ static void ath10k_qmi_msa_ready_ind(struct qmi_handle *qmi_hdl,
 	ath10k_qmi_driver_event_post(qmi, ATH10K_QMI_EVENT_MSA_READY_IND, NULL);
 }
 
-static struct qmi_msg_handler qmi_msg_handler[] = {
+static const struct qmi_msg_handler qmi_msg_handler[] = {
 	{
 		.type = QMI_INDICATION,
 		.msg_id = QMI_WLFW_FW_READY_IND_V01,
@@ -982,7 +1017,7 @@ static void ath10k_qmi_del_server(struct qmi_handle *qmi_hdl,
 					     NULL);
 }
 
-static struct qmi_ops ath10k_qmi_ops = {
+static const struct qmi_ops ath10k_qmi_ops = {
 	.new_server = ath10k_qmi_new_server,
 	.del_server = ath10k_qmi_del_server,
 };

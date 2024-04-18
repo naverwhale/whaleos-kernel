@@ -86,6 +86,15 @@ config TCG_TIS_SYNQUACER
 	  To compile this driver as a module, choose  M here;
 	  the module will be called tpm_tis_synquacer.
 
+config TCG_TIS_I2C_CR50
+	tristate "TPM Interface Specification 2.0 Interface (I2C - CR50)"
+	depends on I2C
+	help
+	  This is a driver for the Google cr50 I2C TPM interface which is a
+	  custom microcontroller and requires a custom i2c protocol interface
+	  to handle the limitations of the hardware.  To compile this driver
+	  as a module, choose M here; the module will be called tcg_tis_i2c_cr50.
+
 config TCG_TIS_I2C_ATMEL
 	tristate "TPM Interface Specification 1.2 Interface (I2C - Atmel)"
 	depends on I2C
@@ -132,15 +141,6 @@ config TCG_ATMEL
 	  If you have a TPM security chip from Atmel say Yes and it 
 	  will be accessible from within Linux.  To compile this driver 
 	  as a module, choose M here; the module will be called tpm_atmel.
-
-config TCG_CR50_I2C
-	tristate "Cr50 I2C Interface"
-	depends on I2C
-	help
-	  If you have a H1 secure module running Cr50 firmware on I2C bus,
-	  say Yes and it will be accessible from within Linux. To compile
-	  this driver as a module, choose M here; the module will be called
-	  cr50_i2c.
 
 config TCG_INFINEON
 	tristate "Infineon Technologies TPM Interface"

@@ -3,7 +3,7 @@
  *
  * Module Name: evgpeblk - GPE block creation and initialization.
  *
- * Copyright (C) 2000 - 2020, Intel Corp.
+ * Copyright (C) 2000 - 2021, Intel Corp.
  *
  *****************************************************************************/
 
@@ -22,6 +22,8 @@ acpi_ev_install_gpe_block(struct acpi_gpe_block_info *gpe_block,
 
 static acpi_status
 acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block);
+
+int last_disabled_gpe = INT_MAX;
 
 /*******************************************************************************
  *
@@ -457,6 +459,8 @@ acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 					gpe_index);
 			gpe_event_info->flags |= ACPI_GPE_INITIALIZED;
 
+			if (gpe_number == last_disabled_gpe)
+				continue;
 			/*
 			 * Ignore GPEs that have no corresponding _Lxx/_Exx method
 			 * and GPEs that are used for wakeup

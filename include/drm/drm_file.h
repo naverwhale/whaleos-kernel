@@ -41,6 +41,7 @@
 struct dma_fence;
 struct drm_file;
 struct drm_device;
+struct drm_printer;
 struct device;
 struct file;
 
@@ -233,6 +234,10 @@ struct drm_file {
 	 * this only matches &drm_device.master if the master is the currently
 	 * active one.
 	 *
+	 * To update @master, both &drm_device.master_mutex and
+	 * @master_lookup_lock need to be held, therefore holding either of
+	 * them is safe and enough for the read side.
+	 *
 	 * When dereferencing this pointer, either hold struct
 	 * &drm_device.master_mutex for the duration of the pointer's use, or
 	 * use drm_file_get_master() if struct &drm_device.master_mutex is not
@@ -244,11 +249,21 @@ struct drm_file {
 	 */
 	struct drm_master *master;
 
-	/** @master_lock: Serializes @master. */
+	/** @master_lookup_lock: Serializes @master. */
 	spinlock_t master_lookup_lock;
 
-	/** @pid: Process that opened this file. */
-	struct pid *pid;
+	/**
+	 * @pid: Process that is using this file.
+	 *
+	 * Must only be dereferenced under a rcu_read_lock or equivalent.
+	 *
+	 * Updates are guarded with dev->filelist_mutex and reference must be
+	 * dropped after a RCU grace period to accommodate lockless readers.
+	 */
+	struct pid __rcu *pid;
+
+	/** @client_id: A unique id for fdinfo */
+	u64 client_id;
 
 	/** @magic: Authentication magic, see @authenticated. */
 	drm_magic_t magic;
@@ -393,6 +408,8 @@ static inline bool drm_is_render_client(const struct drm_file *file_priv)
 	return file_priv->minor->type == DRM_MINOR_RENDER;
 }
 
+void drm_file_update_pid(struct drm_file *);
+
 int drm_open(struct inode *inode, struct file *filp);
 ssize_t drm_read(struct file *filp, char __user *buffer,
 		 size_t count, loff_t *offset);
@@ -415,15 +432,34 @@ void drm_send_event_timestamp_locked(struct drm_device *dev,
 				     struct drm_pending_event *e,
 				     ktime_t timestamp);
 
+/**
+ * struct drm_memory_stats - GEM object stats associated
+ * @shared: Total size of GEM objects shared between processes
+ * @private: Total size of GEM objects
+ * @resident: Total size of GEM objects backing pages
+ * @purgeable: Total size of GEM objects that can be purged (resident and not active)
+ * @active: Total size of GEM objects active on one or more engines
+ *
+ * Used by drm_print_memory_stats()
+ */
+struct drm_memory_stats {
+	u64 shared;
+	u64 private;
+	u64 resident;
+	u64 purgeable;
+	u64 active;
+};
+
+enum drm_gem_object_status;
+
+void drm_print_memory_stats(struct drm_printer *p,
+			    const struct drm_memory_stats *stats,
+			    enum drm_gem_object_status supported_status,
+			    const char *region);
+
+void drm_show_memory_stats(struct drm_printer *p, struct drm_file *file);
+void drm_show_fdinfo(struct seq_file *m, struct file *f);
+
 struct file *mock_drm_getfile(struct drm_minor *minor, unsigned int flags);
-
-#ifdef CONFIG_MMU
-struct drm_vma_offset_manager;
-unsigned long drm_get_unmapped_area(struct file *file,
-				    unsigned long uaddr, unsigned long len,
-				    unsigned long pgoff, unsigned long flags,
-				    struct drm_vma_offset_manager *mgr);
-#endif /* CONFIG_MMU */
-
 
 #endif /* _DRM_FILE_H_ */

@@ -109,6 +109,11 @@ Implicit Fence Poll Support
 .. kernel-doc:: drivers/dma-buf/dma-buf.c
    :doc: implicit fence polling
 
+DMA-BUF statistics
+~~~~~~~~~~~~~~~~~~
+.. kernel-doc:: drivers/dma-buf/dma-buf-sysfs-stats.c
+   :doc: overview
+
 DMA Buffer ioctls
 ~~~~~~~~~~~~~~~~~
 
@@ -121,15 +126,6 @@ Kernel Functions and Structures Reference
    :export:
 
 .. kernel-doc:: include/linux/dma-buf.h
-   :internal:
-
-Buffer Mapping Helpers
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. kernel-doc:: include/linux/dma-buf-map.h
-   :doc: overview
-
-.. kernel-doc:: include/linux/dma-buf-map.h
    :internal:
 
 Reservation Objects
@@ -162,6 +158,12 @@ DMA Fence Signalling Annotations
 .. kernel-doc:: drivers/dma-buf/dma-fence.c
    :doc: fence signalling annotation
 
+DMA Fence Deadline Hints
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. kernel-doc:: drivers/dma-buf/dma-fence.c
+   :doc: deadline hints
+
 DMA Fences Functions Reference
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -169,12 +171,6 @@ DMA Fences Functions Reference
    :export:
 
 .. kernel-doc:: include/linux/dma-fence.h
-   :internal:
-
-Seqno Hardware Fences
-~~~~~~~~~~~~~~~~~~~~~
-
-.. kernel-doc:: include/linux/seqno-fence.h
    :internal:
 
 DMA Fence Array
@@ -195,13 +191,25 @@ DMA Fence Chain
 .. kernel-doc:: include/linux/dma-fence-chain.h
    :internal:
 
-DMA Fence uABI/Sync File
-~~~~~~~~~~~~~~~~~~~~~~~~
+DMA Fence unwrap
+~~~~~~~~~~~~~~~~
+
+.. kernel-doc:: include/linux/dma-fence-unwrap.h
+   :internal:
+
+DMA Fence Sync File
+~~~~~~~~~~~~~~~~~~~
 
 .. kernel-doc:: drivers/dma-buf/sync_file.c
    :export:
 
 .. kernel-doc:: include/linux/sync_file.h
+   :internal:
+
+DMA Fence Sync File uABI
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. kernel-doc:: include/uapi/linux/sync_file.h
    :internal:
 
 Indefinite DMA Fences

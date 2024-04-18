@@ -1,3 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config WHALEBOOK
 	def_bool y
+
+config WHALEBOOK_PSTORE_BASE
+  hex
+  default 0x17fb00000
+  depends on WHALEBOOK
+
+config WHALEBOOK_PSTORE_SIZE
+  hex
+  default 0x100000
+  depends on WHALEBOOK

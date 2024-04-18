@@ -155,7 +155,10 @@ static struct regmap *at91_dt_syscon_sfr(void)
 
 /*
  * usb_hcd_at91_probe - initialize AT91-based HCDs
- * Context: !in_interrupt()
+ * @driver:	Pointer to hc driver instance
+ * @pdev:	USB controller to probe
+ *
+ * Context: task context, might sleep
  *
  * Allocates basic resources for this USB host controller, and
  * then invokes the start() method for the HCD associated with it
@@ -246,12 +249,14 @@ static int usb_hcd_at91_probe(const struct hc_driver *driver,
 
 /*
  * usb_hcd_at91_remove - shutdown processing for AT91-based HCDs
- * Context: !in_interrupt()
+ * @hcd:	USB controller to remove
+ * @pdev:	Platform device required for cleanup
+ *
+ * Context: task context, might sleep
  *
  * Reverses the effect of usb_hcd_at91_probe(), first invoking
  * the HCD's stop() method.  It is always called from a thread
  * context, "rmmod" or something similar.
- *
  */
 static void usb_hcd_at91_remove(struct usb_hcd *hcd,
 				struct platform_device *pdev)
@@ -647,7 +652,13 @@ ohci_hcd_at91_drv_resume(struct device *dev)
 	else
 		at91_start_clock(ohci_at91);
 
-	ohci_resume(hcd, false);
+	/*
+	 * According to the comment in ohci_hcd_at91_drv_suspend()
+	 * we need to do a reset if the 48Mhz clock was stopped,
+	 * that is, if ohci_at91->wakeup is clear. Tell ohci_resume()
+	 * to reset in this case by setting its "hibernated" flag.
+	 */
+	ohci_resume(hcd, !ohci_at91->wakeup);
 
 	return 0;
 }

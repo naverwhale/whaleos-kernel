@@ -54,22 +54,6 @@
 #define R_PU_100K				100000
 #define RATIO_MAX_ADC7				BIT(14)
 
-#define DIE_TEMP_ADC7_SCALE_1			-60000
-#define DIE_TEMP_ADC7_SCALE_2			20000
-#define DIE_TEMP_ADC7_SCALE_FACTOR		1000
-#define DIE_TEMP_ADC7_MAX			160000
-
-/**
- * struct vadc_map_pt - Map the graph representation for ADC channel
- * @x: Represent the ADC digitized code.
- * @y: Represent the physical data which can be temperature, voltage,
- *     resistance.
- */
-struct vadc_map_pt {
-	s32 x;
-	s32 y;
-};
-
 /*
  * VADC_CALIB_ABSOLUTE: uses the 625mV and 1.25V as reference channels.
  * VADC_CALIB_RATIOMETRIC: uses the reference voltage (1.8V) and GND for
@@ -176,6 +160,8 @@ int qcom_adc5_hw_scale(enum vadc_scale_fn_type scaletype,
 
 u16 qcom_adc_tm5_temp_volt_scale(unsigned int prescale_ratio,
 				 u32 full_scale_code_volt, int temp);
+
+u16 qcom_adc_tm5_gen2_temp_res_scale(int temp);
 
 int qcom_adc5_prescaling_from_dt(u32 num, u32 den);
 

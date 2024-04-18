@@ -413,6 +413,23 @@ static void led_trigger_blink_setup(struct led_trigger *trig,
 	read_unlock_irqrestore(&trig->leddev_list_lock, flags);
 }
 
+void led_trigger_direct(struct led_trigger *trig,
+			int brightness)
+{
+	struct led_classdev *led_cdev;
+	unsigned long flags;
+
+	if (!trig)
+		return;
+
+	read_lock_irqsave(&trig->leddev_list_lock, flags);
+	list_for_each_entry(led_cdev, &trig->led_cdevs, trig_list) {
+		led_set_brightness(led_cdev, brightness);
+	}
+	read_unlock_irqrestore(&trig->leddev_list_lock, flags);
+}
+EXPORT_SYMBOL_GPL(led_trigger_direct);
+
 void led_trigger_blink(struct led_trigger *trig,
 		       unsigned long *delay_on,
 		       unsigned long *delay_off)

@@ -1309,7 +1309,6 @@ static int fsi_master_acf_probe(struct platform_device *pdev)
 	master->cf_mem = devm_ioremap_resource(&pdev->dev, &res);
  	if (IS_ERR(master->cf_mem)) {
 		rc = PTR_ERR(master->cf_mem);
-		dev_err(&pdev->dev, "Error %d mapping coldfire memory\n", rc);
  		goto err_free;
 	}
 	dev_dbg(&pdev->dev, "DRAM allocation @%x\n", master->cf_mem_addr);
@@ -1440,3 +1439,4 @@ static struct platform_driver fsi_master_acf = {
 
 module_platform_driver(fsi_master_acf);
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE(FW_FILE_NAME);

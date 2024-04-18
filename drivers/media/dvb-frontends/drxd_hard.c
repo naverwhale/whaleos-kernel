@@ -1622,7 +1622,6 @@ static int CorrectSysClockDeviation(struct drxd_state *state)
 			break;
 		default:
 			return -1;
-			break;
 		}
 
 		/* Compute new sysclock value
@@ -2948,7 +2947,7 @@ error:
 	kfree(state);
 	return NULL;
 }
-EXPORT_SYMBOL(drxd_attach);
+EXPORT_SYMBOL_GPL(drxd_attach);
 
 MODULE_DESCRIPTION("DRXD driver");
 MODULE_AUTHOR("Micronas");

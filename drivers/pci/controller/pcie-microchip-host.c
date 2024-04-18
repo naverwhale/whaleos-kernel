@@ -167,12 +167,12 @@
 #define EVENT_PCIE_DLUP_EXIT			2
 #define EVENT_SEC_TX_RAM_SEC_ERR		3
 #define EVENT_SEC_RX_RAM_SEC_ERR		4
-#define EVENT_SEC_AXI2PCIE_RAM_SEC_ERR		5
-#define EVENT_SEC_PCIE2AXI_RAM_SEC_ERR		6
+#define EVENT_SEC_PCIE2AXI_RAM_SEC_ERR		5
+#define EVENT_SEC_AXI2PCIE_RAM_SEC_ERR		6
 #define EVENT_DED_TX_RAM_DED_ERR		7
 #define EVENT_DED_RX_RAM_DED_ERR		8
-#define EVENT_DED_AXI2PCIE_RAM_DED_ERR		9
-#define EVENT_DED_PCIE2AXI_RAM_DED_ERR		10
+#define EVENT_DED_PCIE2AXI_RAM_DED_ERR		9
+#define EVENT_DED_AXI2PCIE_RAM_DED_ERR		10
 #define EVENT_LOCAL_DMA_END_ENGINE_0		11
 #define EVENT_LOCAL_DMA_END_ENGINE_1		12
 #define EVENT_LOCAL_DMA_ERROR_ENGINE_0		13
@@ -301,27 +301,27 @@ static const struct cause event_cause[NUM_EVENTS] = {
 	LOCAL_EVENT_CAUSE(PM_MSI_INT_SYS_ERR, "system error"),
 };
 
-struct event_map pcie_event_to_event[] = {
+static struct event_map pcie_event_to_event[] = {
 	PCIE_EVENT_TO_EVENT_MAP(L2_EXIT),
 	PCIE_EVENT_TO_EVENT_MAP(HOTRST_EXIT),
 	PCIE_EVENT_TO_EVENT_MAP(DLUP_EXIT),
 };
 
-struct event_map sec_error_to_event[] = {
+static struct event_map sec_error_to_event[] = {
 	SEC_ERROR_TO_EVENT_MAP(TX_RAM_SEC_ERR),
 	SEC_ERROR_TO_EVENT_MAP(RX_RAM_SEC_ERR),
 	SEC_ERROR_TO_EVENT_MAP(PCIE2AXI_RAM_SEC_ERR),
 	SEC_ERROR_TO_EVENT_MAP(AXI2PCIE_RAM_SEC_ERR),
 };
 
-struct event_map ded_error_to_event[] = {
+static struct event_map ded_error_to_event[] = {
 	DED_ERROR_TO_EVENT_MAP(TX_RAM_DED_ERR),
 	DED_ERROR_TO_EVENT_MAP(RX_RAM_DED_ERR),
 	DED_ERROR_TO_EVENT_MAP(PCIE2AXI_RAM_DED_ERR),
 	DED_ERROR_TO_EVENT_MAP(AXI2PCIE_RAM_DED_ERR),
 };
 
-struct event_map local_status_to_event[] = {
+static struct event_map local_status_to_event[] = {
 	LOCAL_STATUS_TO_EVENT_MAP(DMA_END_ENGINE_0),
 	LOCAL_STATUS_TO_EVENT_MAP(DMA_END_ENGINE_1),
 	LOCAL_STATUS_TO_EVENT_MAP(DMA_ERROR_ENGINE_0),
@@ -341,7 +341,7 @@ struct event_map local_status_to_event[] = {
 	LOCAL_STATUS_TO_EVENT_MAP(PM_MSI_INT_SYS_ERR),
 };
 
-struct {
+static struct {
 	u32 base;
 	u32 offset;
 	u32 mask;
@@ -412,16 +412,15 @@ static void mc_handle_msi(struct irq_desc *desc)
 		port->axi_base_addr + MC_PCIE_BRIDGE_ADDR;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
+	int ret;
 
 	status = readl_relaxed(bridge_base_addr + ISTATUS_LOCAL);
 	if (status & PM_MSI_INT_MSI_MASK) {
+		writel_relaxed(status & PM_MSI_INT_MSI_MASK, bridge_base_addr + ISTATUS_LOCAL);
 		status = readl_relaxed(bridge_base_addr + ISTATUS_MSI);
 		for_each_set_bit(bit, &status, msi->num_vectors) {
-			virq = irq_find_mapping(msi->dev_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-			else
+			ret = generic_handle_domain_irq(msi->dev_domain, bit);
+			if (ret)
 				dev_err_ratelimited(dev, "bad MSI IRQ %d\n",
 						    bit);
 		}
@@ -434,13 +433,8 @@ static void mc_msi_bottom_irq_ack(struct irq_data *data)
 	void __iomem *bridge_base_addr =
 		port->axi_base_addr + MC_PCIE_BRIDGE_ADDR;
 	u32 bitpos = data->hwirq;
-	unsigned long status;
 
 	writel_relaxed(BIT(bitpos), bridge_base_addr + ISTATUS_MSI);
-	status = readl_relaxed(bridge_base_addr + ISTATUS_MSI);
-	if (!status)
-		writel_relaxed(BIT(PM_MSI_INT_MSI_SHIFT),
-			       bridge_base_addr + ISTATUS_LOCAL);
 }
 
 static void mc_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
@@ -570,17 +564,15 @@ static void mc_handle_intx(struct irq_desc *desc)
 		port->axi_base_addr + MC_PCIE_BRIDGE_ADDR;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
+	int ret;
 
 	status = readl_relaxed(bridge_base_addr + ISTATUS_LOCAL);
 	if (status & PM_MSI_INT_INTX_MASK) {
 		status &= PM_MSI_INT_INTX_MASK;
 		status >>= PM_MSI_INT_INTX_SHIFT;
 		for_each_set_bit(bit, &status, PCI_NUM_INTX) {
-			virq = irq_find_mapping(port->intx_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-			else
+			ret = generic_handle_domain_irq(port->intx_domain, bit);
+			if (ret)
 				dev_err_ratelimited(dev, "bad INTx IRQ %d\n",
 						    bit);
 		}
@@ -745,7 +737,7 @@ static void mc_handle_event(struct irq_desc *desc)
 	events = get_events(port);
 
 	for_each_set_bit(bit, &events, NUM_EVENTS)
-		generic_handle_irq(irq_find_mapping(port->event_domain, bit));
+		generic_handle_domain_irq(port->event_domain, bit);
 
 	chained_irq_exit(chip, desc);
 }
@@ -902,6 +894,7 @@ static int mc_pcie_init_irq_domains(struct mc_port *port)
 						   &event_domain_ops, port);
 	if (!port->event_domain) {
 		dev_err(dev, "failed to get event domain\n");
+		of_node_put(pcie_intc_node);
 		return -ENOMEM;
 	}
 
@@ -911,6 +904,7 @@ static int mc_pcie_init_irq_domains(struct mc_port *port)
 						  &intx_domain_ops, port);
 	if (!port->intx_domain) {
 		dev_err(dev, "failed to get an INTx IRQ domain\n");
+		of_node_put(pcie_intc_node);
 		return -ENOMEM;
 	}
 
@@ -1023,10 +1017,8 @@ static int mc_platform_init(struct pci_config_window *cfg)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(dev, "unable to request IRQ%d\n", irq);
+	if (irq < 0)
 		return -ENODEV;
-	}
 
 	for (i = 0; i < NUM_EVENTS; i++) {
 		event_irq = irq_create_mapping(port->event_domain, i);

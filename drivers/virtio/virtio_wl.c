@@ -521,7 +521,7 @@ static ssize_t vfd_out_locked(struct virtwl_vfd *vfd, char __user *buffer,
 			      size_t len)
 {
 	struct virtwl_vfd_qentry *qentry, *next;
-	ssize_t read_count = 0;
+	size_t read_count = 0;
 
 	list_for_each_entry_safe(qentry, next, &vfd->in_queue, list) {
 		struct virtio_wl_ctrl_vfd_recv *recv =
@@ -529,18 +529,20 @@ static ssize_t vfd_out_locked(struct virtwl_vfd *vfd, char __user *buffer,
 		size_t recv_offset = sizeof(*recv) + recv->vfd_count *
 				     sizeof(__le32) + qentry->data_offset;
 		u8 *buf = (u8 *)recv + recv_offset;
-		ssize_t to_read = (ssize_t)qentry->len - (ssize_t)recv_offset;
+		size_t to_read = (size_t)qentry->len - recv_offset;
+
+		/* Detect underflow caused by invalid recv->vfd_count value. */
+		if (to_read > (size_t)qentry->len)
+			return -EIO;
 
 		if (qentry->hdr->type != VIRTIO_WL_CMD_VFD_RECV)
 			continue;
 
-		if ((to_read + read_count) > len)
+		if (len - read_count < to_read)
 			to_read = len - read_count;
 
-		if (copy_to_user(buffer + read_count, buf, to_read)) {
-			read_count = -EFAULT;
-			break;
-		}
+		if (copy_to_user(buffer + read_count, buf, to_read))
+			return -EFAULT;
 
 		read_count += to_read;
 
@@ -887,10 +889,10 @@ static int virtwl_vfd_send(struct file *filp, const char __user *buffer,
 	ctrl_send_size = sizeof(*ctrl_send) + vfd_ids_size + len;
 	vmalloced = false;
 	if (ctrl_send_size < PAGE_SIZE)
-		ctrl_send = kzalloc(ctrl_send_size, GFP_KERNEL);
+		ctrl_send = kmalloc(ctrl_send_size, GFP_KERNEL);
 	else {
 		vmalloced = true;
-		ctrl_send = vzalloc(ctrl_send_size);
+		ctrl_send = vmalloc(ctrl_send_size);
 	}
 	if (!ctrl_send) {
 		ret = -ENOMEM;
@@ -901,6 +903,7 @@ static int virtwl_vfd_send(struct file *filp, const char __user *buffer,
 	out_buffer = (u8 *)ctrl_send + ctrl_send_size - len;
 
 	ctrl_send->hdr.type = VIRTIO_WL_CMD_VFD_SEND;
+	ctrl_send->hdr.flags = 0;
 #ifdef SEND_VIRTGPU_RESOURCES
 	if (foreign_id) {
 		struct virtio_wl_ctrl_vfd_send_vfd *v1 = NULL;
@@ -1195,7 +1198,7 @@ static struct virtwl_vfd *do_new(struct virtwl_info *vi,
 			       sizeof(ioctl_new->dmabuf));
 			break;
 		}
-		/* fall-through */
+		fallthrough;
 	default:
 		ret = -EINVAL;
 		goto remove_vfd;
@@ -1322,7 +1325,7 @@ free_vfds:
 		if (vfds[i])
 			do_vfd_close(vfds[i]);
 		if (fds[i] >= 0)
-			__close_fd(current->files, fds[i]);
+			close_fd(fds[i]);
 	}
 	return ret;
 }
@@ -1391,7 +1394,7 @@ static long virtwl_ioctl_new(struct file *filp, void __user *ptr,
 	ret = copy_to_user(ptr, &ioctl_new, size);
 	if (ret) {
 		/* The release operation will handle freeing this alloc */
-		ksys_close(ioctl_new.fd);
+		close_fd(ioctl_new.fd);
 		return -EFAULT;
 	}
 

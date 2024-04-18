@@ -1430,10 +1430,8 @@ static void
 il_hdl_scan_complete(struct il_priv *il, struct il_rx_buf *rxb)
 {
 
-#ifdef CONFIG_IWLEGACY_DEBUG
 	struct il_rx_pkt *pkt = rxb_addr(rxb);
 	struct il_scancomplete_notification *scan_notif = (void *)pkt->u.raw;
-#endif
 
 	D_SCAN("Scan complete: %d channels (TSF 0x%08X:%08X) - %d\n",
 	       scan_notif->scanned_channels, scan_notif->tsf_low,
@@ -2821,10 +2819,10 @@ il_cmd_queue_unmap(struct il_priv *il)
 		i = il_get_cmd_idx(q, q->read_ptr, 0);
 
 		if (txq->meta[i].flags & CMD_MAPPED) {
-			pci_unmap_single(il->pci_dev,
+			dma_unmap_single(&il->pci_dev->dev,
 					 dma_unmap_addr(&txq->meta[i], mapping),
 					 dma_unmap_len(&txq->meta[i], len),
-					 PCI_DMA_BIDIRECTIONAL);
+					 DMA_BIDIRECTIONAL);
 			txq->meta[i].flags = 0;
 		}
 
@@ -2833,10 +2831,10 @@ il_cmd_queue_unmap(struct il_priv *il)
 
 	i = q->n_win;
 	if (txq->meta[i].flags & CMD_MAPPED) {
-		pci_unmap_single(il->pci_dev,
+		dma_unmap_single(&il->pci_dev->dev,
 				 dma_unmap_addr(&txq->meta[i], mapping),
 				 dma_unmap_len(&txq->meta[i], len),
-				 PCI_DMA_BIDIRECTIONAL);
+				 DMA_BIDIRECTIONAL);
 		txq->meta[i].flags = 0;
 	}
 }
@@ -3199,10 +3197,9 @@ il_enqueue_hcmd(struct il_priv *il, struct il_host_cmd *cmd)
 	}
 #endif
 
-	phys_addr =
-	    pci_map_single(il->pci_dev, &out_cmd->hdr, fix_size,
-			   PCI_DMA_BIDIRECTIONAL);
-	if (unlikely(pci_dma_mapping_error(il->pci_dev, phys_addr))) {
+	phys_addr = dma_map_single(&il->pci_dev->dev, &out_cmd->hdr, fix_size,
+				   DMA_BIDIRECTIONAL);
+	if (unlikely(dma_mapping_error(&il->pci_dev->dev, phys_addr))) {
 		idx = -ENOMEM;
 		goto out;
 	}
@@ -3300,8 +3297,8 @@ il_tx_cmd_complete(struct il_priv *il, struct il_rx_buf *rxb)
 
 	txq->time_stamp = jiffies;
 
-	pci_unmap_single(il->pci_dev, dma_unmap_addr(meta, mapping),
-			 dma_unmap_len(meta, len), PCI_DMA_BIDIRECTIONAL);
+	dma_unmap_single(&il->pci_dev->dev, dma_unmap_addr(meta, mapping),
+			 dma_unmap_len(meta, len), DMA_BIDIRECTIONAL);
 
 	/* Input error checking is done when commands are added to queue. */
 	if (meta->flags & CMD_WANT_SKB) {
@@ -5176,7 +5173,7 @@ il_mac_reset_tsf(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	memset(&il->current_ht_config, 0, sizeof(struct il_ht_config));
 
 	/* new association get rid of ibss beacon skb */
-	dev_kfree_skb(il->beacon_skb);
+	dev_consume_skb_irq(il->beacon_skb);
 	il->beacon_skb = NULL;
 	il->timestamp = 0;
 
@@ -5295,7 +5292,7 @@ il_beacon_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	}
 
 	spin_lock_irqsave(&il->lock, flags);
-	dev_kfree_skb(il->beacon_skb);
+	dev_consume_skb_irq(il->beacon_skb);
 	il->beacon_skb = skb;
 
 	timestamp = ((struct ieee80211_mgmt *)skb->data)->u.beacon.timestamp;

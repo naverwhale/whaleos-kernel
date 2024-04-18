@@ -490,6 +490,11 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 		BT_ERR("Can't allocate control structure");
 		return -ENFILE;
 	}
+	if (percpu_init_rwsem(&hu->proto_lock)) {
+		BT_ERR("Can't allocate semaphore structure");
+		kfree(hu);
+		return -ENOMEM;
+	}
 
 	tty->disc_data = hu;
 	hu->tty = tty;
@@ -501,8 +506,6 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 
 	INIT_WORK(&hu->init_ready, hci_uart_init_work);
 	INIT_WORK(&hu->write_work, hci_uart_write_work);
-
-	percpu_init_rwsem(&hu->proto_lock);
 
 	/* Flush any pending characters in the driver */
 	tty_driver_flush_buffer(tty);
@@ -593,7 +596,7 @@ static void hci_uart_tty_wakeup(struct tty_struct *tty)
  * Return Value:    None
  */
 static void hci_uart_tty_receive(struct tty_struct *tty, const u8 *data,
-				 char *flags, int count)
+				 const char *flags, int count)
 {
 	struct hci_uart *hu = tty->disc_data;
 
@@ -821,7 +824,7 @@ static __poll_t hci_uart_tty_poll(struct tty_struct *tty,
 
 static struct tty_ldisc_ops hci_uart_ldisc = {
 	.owner		= THIS_MODULE,
-	.magic		= TTY_LDISC_MAGIC,
+	.num		= N_HCI,
 	.name		= "n_hci",
 	.open		= hci_uart_tty_open,
 	.close		= hci_uart_tty_close,
@@ -841,7 +844,7 @@ static int __init hci_uart_init(void)
 	BT_INFO("HCI UART driver ver %s", VERSION);
 
 	/* Register the tty discipline */
-	err = tty_register_ldisc(N_HCI, &hci_uart_ldisc);
+	err = tty_register_ldisc(&hci_uart_ldisc);
 	if (err) {
 		BT_ERR("HCI line discipline registration failed. (%d)", err);
 		return err;
@@ -883,8 +886,6 @@ static int __init hci_uart_init(void)
 
 static void __exit hci_uart_exit(void)
 {
-	int err;
-
 #ifdef CONFIG_BT_HCIUART_H4
 	h4_deinit();
 #endif
@@ -916,10 +917,7 @@ static void __exit hci_uart_exit(void)
 	mrvl_deinit();
 #endif
 
-	/* Release tty registration of line discipline */
-	err = tty_unregister_ldisc(N_HCI);
-	if (err)
-		BT_ERR("Can't unregister HCI line discipline (%d)", err);
+	tty_unregister_ldisc(&hci_uart_ldisc);
 }
 
 module_init(hci_uart_init);

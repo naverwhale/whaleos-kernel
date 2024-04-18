@@ -39,6 +39,13 @@
 #define EC_MAX_RESPONSE_OVERHEAD	32
 
 /*
+ * EC panic is not covered by the standard (0-F) ACPI notify values.
+ * Arbitrarily choosing B0 to notify ec panic, which is in the 84-BF
+ * device specific ACPI notify range.
+ */
+#define ACPI_NOTIFY_CROS_EC_PANIC 0xB0
+
+/*
  * Command interface between EC and AP, for LPC, I2C and SPI interfaces.
  */
 enum {
@@ -134,6 +141,7 @@ struct cros_ec_command {
  *      main EC.
  * @pd: The platform_device used by the mfd driver to interface with the
  *      PD behind an EC.
+ * @panic_notifier: EC panic notifier.
  */
 struct cros_ec_device {
 	/* These are used by other drivers that want to talk to the EC */
@@ -177,6 +185,8 @@ struct cros_ec_device {
 	/* The platform devices used by the mfd driver */
 	struct platform_device *ec;
 	struct platform_device *pd;
+
+	struct blocking_notifier_head panic_notifier;
 };
 
 /**
@@ -208,7 +218,7 @@ struct cros_ec_dev {
 	struct cros_ec_debugfs *debug_info;
 	bool has_kb_wake_angle;
 	u16 cmd_offset;
-	u32 features[2];
+	struct ec_response_get_features features;
 };
 
 #define to_cros_ec_dev(dev)  container_of(dev, struct cros_ec_dev, class_dev)
@@ -218,6 +228,9 @@ int cros_ec_prepare_tx(struct cros_ec_device *ec_dev,
 
 int cros_ec_check_result(struct cros_ec_device *ec_dev,
 			 struct cros_ec_command *msg);
+
+int cros_ec_cmd_xfer(struct cros_ec_device *ec_dev,
+		     struct cros_ec_command *msg);
 
 int cros_ec_cmd_xfer_status(struct cros_ec_device *ec_dev,
 			    struct cros_ec_command *msg);
@@ -230,9 +243,12 @@ int cros_ec_get_next_event(struct cros_ec_device *ec_dev,
 
 u32 cros_ec_get_host_event(struct cros_ec_device *ec_dev);
 
-int cros_ec_check_features(struct cros_ec_dev *ec, int feature);
+bool cros_ec_check_features(struct cros_ec_dev *ec, int feature);
 
 int cros_ec_get_sensor_count(struct cros_ec_dev *ec);
+
+int cros_ec_cmd(struct cros_ec_device *ec_dev, unsigned int version, int command, void *outdata,
+		    size_t outsize, void *indata, size_t insize);
 
 /**
  * cros_ec_get_time_ns() - Return time in ns.

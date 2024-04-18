@@ -71,7 +71,7 @@ static int cz_da7219_init(struct snd_soc_pcm_runtime *rtd)
 				SND_JACK_HEADSET | SND_JACK_LINEOUT |
 				SND_JACK_BTN_0 | SND_JACK_BTN_1 |
 				SND_JACK_BTN_2 | SND_JACK_BTN_3,
-				&cz_jack, NULL, 0);
+				&cz_jack);
 	if (ret) {
 		dev_err(card->dev, "HP jack creation failed %d\n", ret);
 		return ret;
@@ -151,7 +151,7 @@ static int cz_rt5682_init(struct snd_soc_pcm_runtime *rtd)
 				    SND_JACK_HEADSET | SND_JACK_LINEOUT |
 				    SND_JACK_BTN_0 | SND_JACK_BTN_1 |
 				    SND_JACK_BTN_2 | SND_JACK_BTN_3,
-				    &cz_jack, NULL, 0);
+				    &cz_jack);
 	if (ret) {
 		dev_err(card->dev, "HP jack creation failed %d\n", ret);
 		return ret;
@@ -756,15 +756,9 @@ static int cz_probe(struct platform_device *pdev)
 	snd_soc_card_set_drvdata(card, machine);
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret) {
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"devm_snd_soc_register_card(%s) failed: %d\n",
-				card->name, ret);
-		else
-			dev_dbg(&pdev->dev,
-				"devm_snd_soc_register_card(%s) probe deferred: %d\n",
-				card->name, ret);
-		return ret;
+		return dev_err_probe(&pdev->dev, ret,
+				"devm_snd_soc_register_card(%s) failed\n",
+				card->name);
 	}
 	bt_uart_enable = !device_property_read_bool(&pdev->dev,
 						    "bt-pad-enable");

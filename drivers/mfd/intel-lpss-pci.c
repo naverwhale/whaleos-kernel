@@ -65,27 +65,35 @@ static const struct intel_lpss_platform_info spt_info = {
 	.clk_rate = 120000000,
 };
 
-static struct property_entry spt_i2c_properties[] = {
+static const struct property_entry spt_i2c_properties[] = {
 	PROPERTY_ENTRY_U32("i2c-sda-hold-time-ns", 230),
 	{ },
 };
 
-static const struct intel_lpss_platform_info spt_i2c_info = {
-	.clk_rate = 120000000,
+static const struct software_node spt_i2c_node = {
 	.properties = spt_i2c_properties,
 };
 
-static struct property_entry uart_properties[] = {
+static const struct intel_lpss_platform_info spt_i2c_info = {
+	.clk_rate = 120000000,
+	.swnode = &spt_i2c_node,
+};
+
+static const struct property_entry uart_properties[] = {
 	PROPERTY_ENTRY_U32("reg-io-width", 4),
 	PROPERTY_ENTRY_U32("reg-shift", 2),
 	PROPERTY_ENTRY_BOOL("snps,uart-16550-compatible"),
 	{ },
 };
 
+static const struct software_node uart_node = {
+	.properties = uart_properties,
+};
+
 static const struct intel_lpss_platform_info spt_uart_info = {
 	.clk_rate = 120000000,
 	.clk_con_id = "baudclk",
-	.properties = uart_properties,
+	.swnode = &uart_node,
 };
 
 static const struct intel_lpss_platform_info bxt_info = {
@@ -95,53 +103,65 @@ static const struct intel_lpss_platform_info bxt_info = {
 static const struct intel_lpss_platform_info bxt_uart_info = {
 	.clk_rate = 100000000,
 	.clk_con_id = "baudclk",
-	.properties = uart_properties,
+	.swnode = &uart_node,
 };
 
-static struct property_entry bxt_i2c_properties[] = {
+static const struct property_entry bxt_i2c_properties[] = {
 	PROPERTY_ENTRY_U32("i2c-sda-hold-time-ns", 42),
 	PROPERTY_ENTRY_U32("i2c-sda-falling-time-ns", 171),
 	PROPERTY_ENTRY_U32("i2c-scl-falling-time-ns", 208),
 	{ },
 };
 
-static const struct intel_lpss_platform_info bxt_i2c_info = {
-	.clk_rate = 133000000,
+static const struct software_node bxt_i2c_node = {
 	.properties = bxt_i2c_properties,
 };
 
-static struct property_entry apl_i2c_properties[] = {
+static const struct intel_lpss_platform_info bxt_i2c_info = {
+	.clk_rate = 133000000,
+	.swnode = &bxt_i2c_node,
+};
+
+static const struct property_entry apl_i2c_properties[] = {
 	PROPERTY_ENTRY_U32("i2c-sda-hold-time-ns", 207),
 	PROPERTY_ENTRY_U32("i2c-sda-falling-time-ns", 171),
 	PROPERTY_ENTRY_U32("i2c-scl-falling-time-ns", 208),
 	{ },
 };
 
-static const struct intel_lpss_platform_info apl_i2c_info = {
-	.clk_rate = 133000000,
+static const struct software_node apl_i2c_node = {
 	.properties = apl_i2c_properties,
 };
 
-static struct property_entry glk_i2c_properties[] = {
+static const struct intel_lpss_platform_info apl_i2c_info = {
+	.clk_rate = 133000000,
+	.swnode = &apl_i2c_node,
+};
+
+static const struct property_entry glk_i2c_properties[] = {
 	PROPERTY_ENTRY_U32("i2c-sda-hold-time-ns", 313),
 	PROPERTY_ENTRY_U32("i2c-sda-falling-time-ns", 171),
 	PROPERTY_ENTRY_U32("i2c-scl-falling-time-ns", 290),
 	{ },
 };
 
+static const struct software_node glk_i2c_node = {
+	.properties = glk_i2c_properties,
+};
+
 static const struct intel_lpss_platform_info glk_i2c_info = {
 	.clk_rate = 133000000,
-	.properties = glk_i2c_properties,
+	.swnode = &glk_i2c_node,
 };
 
 static const struct intel_lpss_platform_info cnl_i2c_info = {
 	.clk_rate = 216000000,
-	.properties = spt_i2c_properties,
+	.swnode = &spt_i2c_node,
 };
 
 static const struct intel_lpss_platform_info ehl_i2c_info = {
 	.clk_rate = 100000000,
-	.properties = bxt_i2c_properties,
+	.swnode = &bxt_i2c_node,
 };
 
 static const struct pci_device_id intel_lpss_pci_ids[] = {
@@ -285,6 +305,8 @@ static const struct pci_device_id intel_lpss_pci_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x51c5), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x51c6), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x51c7), (kernel_ulong_t)&bxt_uart_info },
+	{ PCI_VDEVICE(INTEL, 0x51d8), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x51d9), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x51e8), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x51e9), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x51ea), (kernel_ulong_t)&bxt_i2c_info },
@@ -334,6 +356,19 @@ static const struct pci_device_id intel_lpss_pci_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x7afc), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x7afd), (kernel_ulong_t)&bxt_i2c_info },
 	{ PCI_VDEVICE(INTEL, 0x7afe), (kernel_ulong_t)&bxt_uart_info },
+	/* MTL-P */
+	{ PCI_VDEVICE(INTEL, 0x7e25), (kernel_ulong_t)&bxt_uart_info },
+	{ PCI_VDEVICE(INTEL, 0x7e26), (kernel_ulong_t)&bxt_uart_info },
+	{ PCI_VDEVICE(INTEL, 0x7e27), (kernel_ulong_t)&bxt_info },
+	{ PCI_VDEVICE(INTEL, 0x7e30), (kernel_ulong_t)&bxt_info },
+	{ PCI_VDEVICE(INTEL, 0x7e46), (kernel_ulong_t)&bxt_info },
+	{ PCI_VDEVICE(INTEL, 0x7e50), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x7e51), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x7e52), (kernel_ulong_t)&bxt_uart_info },
+	{ PCI_VDEVICE(INTEL, 0x7e78), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x7e79), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x7e7a), (kernel_ulong_t)&bxt_i2c_info },
+	{ PCI_VDEVICE(INTEL, 0x7e7b), (kernel_ulong_t)&bxt_i2c_info },
 	/* LKF */
 	{ PCI_VDEVICE(INTEL, 0x98a8), (kernel_ulong_t)&bxt_uart_info },
 	{ PCI_VDEVICE(INTEL, 0x98a9), (kernel_ulong_t)&bxt_uart_info },

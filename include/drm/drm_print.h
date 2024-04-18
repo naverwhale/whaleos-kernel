@@ -35,13 +35,14 @@
 #include <drm/drm.h>
 
 /* Do *not* use outside of drm_print.[ch]! */
-extern unsigned int __drm_debug;
+extern unsigned int __drm_debug_syslog;
+extern unsigned int __drm_debug_trace;
 
 /**
  * DOC: print
  *
  * A simple wrapper for dev_printk(), seq_printf(), etc.  Allows same
- * debug code to be used for both debugfs and printk logging.
+ * debug code to be used for debugfs, printk and tracefs logging.
  *
  * For example::
  *
@@ -85,8 +86,12 @@ void __drm_puts_coredump(struct drm_printer *p, const char *str);
 void __drm_printfn_seq_file(struct drm_printer *p, struct va_format *vaf);
 void __drm_puts_seq_file(struct drm_printer *p, const char *str);
 void __drm_printfn_info(struct drm_printer *p, struct va_format *vaf);
-void __drm_printfn_debug(struct drm_printer *p, struct va_format *vaf);
+void __drm_printfn_debug_syslog(struct drm_printer *p, struct va_format *vaf);
+void __drm_printfn_trace(struct drm_printer *p, struct va_format *vaf);
+void __drm_printfn_debug_syslog_and_trace(struct drm_printer *p,
+					   struct va_format *vaf);
 void __drm_printfn_err(struct drm_printer *p, struct va_format *vaf);
+void __drm_printfn_noop(struct drm_printer *p, struct va_format *vaf);
 
 __printf(2, 3)
 void drm_printf(struct drm_printer *p, const char *f, ...);
@@ -218,7 +223,8 @@ static inline struct drm_printer drm_info_printer(struct device *dev)
 }
 
 /**
- * drm_debug_printer - construct a &drm_printer that outputs to pr_debug()
+ * drm_debug_printer - construct a &drm_printer that outputs to pr_debug() and
+ * drm tracefs
  * @prefix: debug output prefix
  *
  * RETURNS:
@@ -227,7 +233,7 @@ static inline struct drm_printer drm_info_printer(struct device *dev)
 static inline struct drm_printer drm_debug_printer(const char *prefix)
 {
 	struct drm_printer p = {
-		.printfn = __drm_printfn_debug,
+		.printfn = __drm_printfn_debug_syslog_and_trace,
 		.prefix = prefix
 	};
 	return p;
@@ -253,14 +259,14 @@ static inline struct drm_printer drm_err_printer(const char *prefix)
  * enum drm_debug_category - The DRM debug categories
  *
  * Each of the DRM debug logging macros use a specific category, and the logging
- * is filtered by the drm.debug module parameter. This enum specifies the values
- * for the interface.
+ * is filtered by the drm.debug and drm.trace module parameters. This enum
+ * specifies the values for the interface.
  *
  * Each DRM_DEBUG_<CATEGORY> macro logs to DRM_UT_<CATEGORY> category, except
  * DRM_DEBUG() logs to DRM_UT_CORE.
  *
- * Enabling verbose debug messages is done through the drm.debug parameter, each
- * category being enabled by a bit:
+ * Enabling verbose debug messages is done through the drm.debug and drm.trace
+ * parameters, each category being enabled by a bit:
  *
  *  - drm.debug=0x1 will enable CORE messages
  *  - drm.debug=0x2 will enable DRIVER messages
@@ -269,9 +275,13 @@ static inline struct drm_printer drm_err_printer(const char *prefix)
  *  - drm.debug=0x1ff will enable all messages
  *
  * An interesting feature is that it's possible to enable verbose logging at
- * run-time by echoing the debug value in its sysfs node::
+ * run-time by echoing the debug category value in its sysfs node::
  *
+ *   # For syslog logging:
  *   # echo 0xf > /sys/module/drm/parameters/debug
+ *
+ *   # For tracefs logging:
+ *   # echo 0xf > /sys/module/drm/parameters/trace
  *
  */
 enum drm_debug_category {
@@ -319,15 +329,79 @@ enum drm_debug_category {
 	DRM_UT_DRMRES		= 0x200,
 };
 
+static inline bool drm_debug_syslog_enabled(enum drm_debug_category category)
+{
+	return unlikely(__drm_debug_syslog & category);
+}
+
+static inline bool drm_debug_trace_enabled(enum drm_debug_category category)
+{
+	return unlikely(__drm_debug_trace & category);
+}
+
 static inline bool drm_debug_enabled(enum drm_debug_category category)
 {
-	return unlikely(__drm_debug & category);
+	return drm_debug_syslog_enabled(category) ||
+	       drm_debug_trace_enabled(category);
 }
+
+/**
+ * drm_debug_category_printer - construct a &drm_printer that outputs to
+ * pr_debug() and/or the drm tracefs instance if enabled for the given category.
+ * @category: the DRM_UT_* message category this message belongs to
+ * @prefix: trace output prefix
+ *
+ * RETURNS:
+ * The &drm_printer object
+ */
+static inline struct drm_printer
+drm_debug_category_printer(enum drm_debug_category category,
+			   const char *prefix)
+{
+	struct drm_printer p = {
+		.prefix = prefix
+	};
+
+	if (drm_debug_syslog_enabled(category) &&
+	    drm_debug_trace_enabled(category)) {
+		p.printfn = __drm_printfn_debug_syslog_and_trace;
+	} else if (drm_debug_syslog_enabled(category)) {
+		p.printfn = __drm_printfn_debug_syslog;
+	} else if (drm_debug_trace_enabled(category)) {
+		p.printfn = __drm_printfn_trace;
+	} else {
+		WARN(1, "Debug category %d is inactive.", category);
+		p.printfn = __drm_printfn_noop;
+	}
+
+	return p;
+}
+
+
+#ifdef CONFIG_TRACING
+void drm_trace_init(void);
+__printf(1, 2)
+void drm_trace_printf(const char *format, ...);
+void drm_trace_cleanup(void);
+#else
+static inline void drm_trace_init(void)
+{
+}
+
+__printf(1, 2)
+static inline void drm_trace_printf(const char *format, ...)
+{
+}
+
+static inline void drm_trace_cleanup(void)
+{
+}
+#endif
 
 /*
  * struct device based logging
  *
- * Prefer drm_device based logging over device or prink based logging.
+ * Prefer drm_device based logging over device or printk based logging.
  */
 
 __printf(3, 4)
@@ -340,6 +414,8 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 /**
  * DRM_DEV_ERROR() - Error output.
  *
+ * NOTE: this is deprecated in favor of drm_err() or dev_err().
+ *
  * @dev: device pointer
  * @fmt: printf() like format string.
  */
@@ -348,6 +424,9 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 
 /**
  * DRM_DEV_ERROR_RATELIMITED() - Rate limited error output.
+ *
+ * NOTE: this is deprecated in favor of drm_err_ratelimited() or
+ * dev_err_ratelimited().
  *
  * @dev: device pointer
  * @fmt: printf() like format string.
@@ -364,9 +443,11 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 		DRM_DEV_ERROR(dev, fmt, ##__VA_ARGS__);			\
 })
 
+/* NOTE: this is deprecated in favor of drm_info() or dev_info(). */
 #define DRM_DEV_INFO(dev, fmt, ...)				\
 	drm_dev_printk(dev, KERN_INFO, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_info_once() or dev_info_once(). */
 #define DRM_DEV_INFO_ONCE(dev, fmt, ...)				\
 ({									\
 	static bool __print_once __read_mostly;				\
@@ -379,6 +460,8 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 /**
  * DRM_DEV_DEBUG() - Debug output for generic drm code
  *
+ * NOTE: this is deprecated in favor of drm_dbg_core().
+ *
  * @dev: device pointer
  * @fmt: printf() like format string.
  */
@@ -387,6 +470,8 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 /**
  * DRM_DEV_DEBUG_DRIVER() - Debug output for vendor specific part of the driver
  *
+ * NOTE: this is deprecated in favor of drm_dbg() or dev_dbg().
+ *
  * @dev: device pointer
  * @fmt: printf() like format string.
  */
@@ -394,6 +479,8 @@ void drm_dev_dbg(const struct device *dev, enum drm_debug_category category,
 	drm_dev_dbg(dev, DRM_UT_DRIVER,	fmt, ##__VA_ARGS__)
 /**
  * DRM_DEV_DEBUG_KMS() - Debug output for modesetting code
+ *
+ * NOTE: this is deprecated in favor of drm_dbg_kms().
  *
  * @dev: device pointer
  * @fmt: printf() like format string.
@@ -480,47 +567,63 @@ void __drm_err(const char *format, ...);
 #define _DRM_PRINTK(once, level, fmt, ...)				\
 	printk##once(KERN_##level "[" DRM_NAME "] " fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of pr_info(). */
 #define DRM_INFO(fmt, ...)						\
 	_DRM_PRINTK(, INFO, fmt, ##__VA_ARGS__)
+/* NOTE: this is deprecated in favor of pr_notice(). */
 #define DRM_NOTE(fmt, ...)						\
 	_DRM_PRINTK(, NOTICE, fmt, ##__VA_ARGS__)
+/* NOTE: this is deprecated in favor of pr_warn(). */
 #define DRM_WARN(fmt, ...)						\
 	_DRM_PRINTK(, WARNING, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of pr_info_once(). */
 #define DRM_INFO_ONCE(fmt, ...)						\
 	_DRM_PRINTK(_once, INFO, fmt, ##__VA_ARGS__)
+/* NOTE: this is deprecated in favor of pr_notice_once(). */
 #define DRM_NOTE_ONCE(fmt, ...)						\
 	_DRM_PRINTK(_once, NOTICE, fmt, ##__VA_ARGS__)
+/* NOTE: this is deprecated in favor of pr_warn_once(). */
 #define DRM_WARN_ONCE(fmt, ...)						\
 	_DRM_PRINTK(_once, WARNING, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of pr_err(). */
 #define DRM_ERROR(fmt, ...)						\
 	__drm_err(fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of pr_err_ratelimited(). */
 #define DRM_ERROR_RATELIMITED(fmt, ...)					\
 	DRM_DEV_ERROR_RATELIMITED(NULL, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_core(NULL, ...). */
 #define DRM_DEBUG(fmt, ...)						\
 	__drm_dbg(DRM_UT_CORE, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg(NULL, ...). */
 #define DRM_DEBUG_DRIVER(fmt, ...)					\
 	__drm_dbg(DRM_UT_DRIVER, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_kms(NULL, ...). */
 #define DRM_DEBUG_KMS(fmt, ...)						\
 	__drm_dbg(DRM_UT_KMS, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_prime(NULL, ...). */
 #define DRM_DEBUG_PRIME(fmt, ...)					\
 	__drm_dbg(DRM_UT_PRIME, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_atomic(NULL, ...). */
 #define DRM_DEBUG_ATOMIC(fmt, ...)					\
 	__drm_dbg(DRM_UT_ATOMIC, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_vbl(NULL, ...). */
 #define DRM_DEBUG_VBL(fmt, ...)						\
 	__drm_dbg(DRM_UT_VBL, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_lease(NULL, ...). */
 #define DRM_DEBUG_LEASE(fmt, ...)					\
 	__drm_dbg(DRM_UT_LEASE, fmt, ##__VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_dp(NULL, ...). */
 #define DRM_DEBUG_DP(fmt, ...)						\
 	__drm_dbg(DRM_UT_DP, fmt, ## __VA_ARGS__)
 
@@ -536,6 +639,7 @@ void __drm_err(const char *format, ...);
 #define drm_dbg_kms_ratelimited(drm, fmt, ...) \
 	__DRM_DEFINE_DBG_RATELIMITED(KMS, drm, fmt, ## __VA_ARGS__)
 
+/* NOTE: this is deprecated in favor of drm_dbg_kms_ratelimited(NULL, ...). */
 #define DRM_DEBUG_KMS_RATELIMITED(fmt, ...) drm_dbg_kms_ratelimited(NULL, fmt, ## __VA_ARGS__)
 
 /*

@@ -102,7 +102,6 @@ struct nouveau_cli {
 	struct list_head head;
 	void *abi16;
 	struct list_head objects;
-	struct list_head notifys;
 	char name[32];
 
 	struct work_struct work;
@@ -138,6 +137,11 @@ struct nouveau_drm {
 	struct drm_device *dev;
 
 	struct list_head clients;
+
+	/**
+	 * @clients_lock: Protects access to the @clients list of &struct nouveau_cli.
+	 */
+	struct mutex clients_lock;
 
 	u8 old_pm_cap;
 
@@ -197,7 +201,7 @@ struct nouveau_drm {
 	struct nvbios vbios;
 	struct nouveau_display *display;
 	struct work_struct hpd_work;
-	struct mutex hpd_lock;
+	spinlock_t hpd_lock;
 	u32 hpd_pending;
 	struct work_struct fbcon_work;
 	int fbcon_new_state;
@@ -260,11 +264,11 @@ void nouveau_drm_device_remove(struct drm_device *dev);
 #define NV_INFO(drm,f,a...) NV_PRINTK(info, &(drm)->client, f, ##a)
 
 #define NV_DEBUG(drm,f,a...) do {                                              \
-	if (drm_debug_enabled(DRM_UT_DRIVER))                                  \
+	if (drm_debug_syslog_enabled(DRM_UT_DRIVER))                                  \
 		NV_PRINTK(info, &(drm)->client, f, ##a);                       \
 } while(0)
 #define NV_ATOMIC(drm,f,a...) do {                                             \
-	if (drm_debug_enabled(DRM_UT_ATOMIC))                                  \
+	if (drm_debug_syslog_enabled(DRM_UT_ATOMIC))                                  \
 		NV_PRINTK(info, &(drm)->client, f, ##a);                       \
 } while(0)
 

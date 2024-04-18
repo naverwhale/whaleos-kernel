@@ -17,6 +17,7 @@
 #define AMD_GPIO_PINS_BANK3     32
 
 #define WAKE_INT_MASTER_REG 0xfc
+#define INTERNAL_GPIO0_DEBOUNCE (1 << 15)
 #define EOI_MASK (1 << 29)
 
 #define WAKE_INT_STATUS_REG0 0x2f8
@@ -98,6 +99,7 @@ struct amd_gpio {
 	struct resource         *res;
 	struct platform_device  *pdev;
 	u32			*saved_regs;
+	int			irq;
 };
 
 /*  KERNCZ configuration*/

@@ -385,9 +385,7 @@ static void ar933x_uart_rx_chars(struct ar933x_uart_port *up)
 			tty_insert_flip_char(port, ch, TTY_NORMAL);
 	} while (max_count-- > 0);
 
-	spin_unlock(&up->port.lock);
 	tty_flip_buffer_push(port);
-	spin_lock(&up->port.lock);
 }
 
 static void ar933x_uart_tx_chars(struct ar933x_uart_port *up)
@@ -593,6 +591,11 @@ static int ar933x_config_rs485(struct uart_port *port,
 		dev_err(port->dev, "RS485 needs rts-gpio\n");
 		return 1;
 	}
+
+	if (rs485conf->flags & SER_RS485_ENABLED)
+		gpiod_set_value(up->rts_gpiod,
+			!!(rs485conf->flags & SER_RS485_RTS_AFTER_SEND));
+
 	port->rs485 = *rs485conf;
 	return 0;
 }

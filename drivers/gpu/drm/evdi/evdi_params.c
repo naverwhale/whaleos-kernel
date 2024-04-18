@@ -13,7 +13,7 @@
 #include "evdi_params.h"
 #include "evdi_debug.h"
 
-unsigned int evdi_loglevel __read_mostly = EVDI_LOGLEVEL_DEBUG;
+unsigned int evdi_loglevel __read_mostly = EVDI_LOGLEVEL_INFO;
 unsigned short int evdi_initial_device_count __read_mostly;
 
 module_param_named(initial_loglevel, evdi_loglevel, int, 0400);
@@ -22,3 +22,4 @@ MODULE_PARM_DESC(initial_loglevel, "Initial log level");
 module_param_named(initial_device_count,
 		   evdi_initial_device_count, ushort, 0644);
 MODULE_PARM_DESC(initial_device_count, "Initial DRM device count (default: 0)");
+

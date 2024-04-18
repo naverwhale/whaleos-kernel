@@ -21,12 +21,7 @@
 
 #include <linux/compiler.h>
 #include <linux/mutex.h>
-#include <linux/version.h>
 
-#if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE || defined(EL8)
-#else
-#include <drm/drmP.h>
-#endif
 #include <drm/drm_crtc_helper.h>
 
 #include "evdi_cursor.h"
@@ -55,11 +50,7 @@ static void evdi_cursor_set_gem(struct evdi_cursor *cursor,
 	if (obj)
 		drm_gem_object_get(&obj->base);
 	if (cursor->obj)
-#if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
 		drm_gem_object_put(&cursor->obj->base);
-#else
-		drm_gem_object_put_unlocked(&cursor->obj->base);
-#endif
 
 	cursor->obj = obj;
 }
@@ -232,8 +223,8 @@ int evdi_cursor_compose_and_copy(struct evdi_cursor *cursor,
 			bool const is_pix_sane =
 				mouse_pix_x >= 0 &&
 				mouse_pix_y >= 0 &&
-				mouse_pix_x < fb->width &&
-				mouse_pix_y < fb->height;
+				mouse_pix_x < (int)fb->width &&
+				mouse_pix_y < (int)fb->height;
 
 			if (!is_pix_sane)
 				continue;

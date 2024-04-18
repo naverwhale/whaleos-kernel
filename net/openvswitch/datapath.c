@@ -43,6 +43,7 @@
 #include "flow_table.h"
 #include "flow_netlink.h"
 #include "meter.h"
+#include "openvswitch_trace.h"
 #include "vport-internal_dev.h"
 #include "vport-netdev.h"
 
@@ -132,6 +133,8 @@ static int queue_userspace_packet(struct datapath *dp, struct sk_buff *,
 
 static void ovs_dp_masks_rebalance(struct work_struct *work);
 
+static int ovs_dp_set_upcall_portids(struct datapath *, const struct nlattr *);
+
 /* Must be called with rcu_read_lock or ovs_mutex. */
 const char *ovs_dp_name(const struct datapath *dp)
 {
@@ -165,6 +168,7 @@ static void destroy_dp_rcu(struct rcu_head *rcu)
 	free_percpu(dp->stats_percpu);
 	kfree(dp->ports);
 	ovs_meters_exit(dp);
+	kfree(rcu_dereference_raw(dp->upcall_portids));
 	kfree(dp);
 }
 
@@ -238,13 +242,26 @@ void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
 
 		memset(&upcall, 0, sizeof(upcall));
 		upcall.cmd = OVS_PACKET_CMD_MISS;
-		upcall.portid = ovs_vport_find_upcall_portid(p, skb);
+
+		if (dp->user_features & OVS_DP_F_DISPATCH_UPCALL_PER_CPU)
+			upcall.portid =
+			    ovs_dp_get_upcall_portid(dp, smp_processor_id());
+		else
+			upcall.portid = ovs_vport_find_upcall_portid(p, skb);
+
 		upcall.mru = OVS_CB(skb)->mru;
 		error = ovs_dp_upcall(dp, skb, key, &upcall, 0);
-		if (unlikely(error))
-			kfree_skb(skb);
-		else
+		switch (error) {
+		case 0:
+		case -EAGAIN:
+		case -ERESTARTSYS:
+		case -EINTR:
 			consume_skb(skb);
+			break;
+		default:
+			kfree_skb(skb);
+			break;
+		}
 		stats_counter = &stats->n_missed;
 		goto out;
 	}
@@ -274,6 +291,9 @@ int ovs_dp_upcall(struct datapath *dp, struct sk_buff *skb,
 {
 	struct dp_stats_percpu *stats;
 	int err;
+
+	if (trace_ovs_dp_upcall_enabled())
+		trace_ovs_dp_upcall(dp, skb, key, upcall_info);
 
 	if (upcall_info->portid == 0) {
 		err = -ENOTCONN;
@@ -537,8 +557,9 @@ static int queue_userspace_packet(struct datapath *dp, struct sk_buff *skb,
 out:
 	if (err)
 		skb_tx_error(skb);
-	kfree_skb(user_skb);
-	kfree_skb(nskb);
+	consume_skb(user_skb);
+	consume_skb(nskb);
+
 	return err;
 }
 
@@ -925,6 +946,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	struct sw_flow_mask mask;
 	struct sk_buff *reply;
 	struct datapath *dp;
+	struct sw_flow_key *key;
 	struct sw_flow_actions *acts;
 	struct sw_flow_match match;
 	u32 ufid_flags = ovs_nla_get_ufid_flags(a[OVS_FLOW_ATTR_UFID_FLAGS]);
@@ -952,30 +974,32 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	/* Extract key. */
-	ovs_match_init(&match, &new_flow->key, false, &mask);
+	key = kzalloc(sizeof(*key), GFP_KERNEL);
+	if (!key) {
+		error = -ENOMEM;
+		goto err_kfree_flow;
+	}
+
+	ovs_match_init(&match, key, false, &mask);
 	error = ovs_nla_get_match(net, &match, a[OVS_FLOW_ATTR_KEY],
 				  a[OVS_FLOW_ATTR_MASK], log);
 	if (error)
-		goto err_kfree_flow;
+		goto err_kfree_key;
+
+	ovs_flow_mask_key(&new_flow->key, key, true, &mask);
 
 	/* Extract flow identifier. */
 	error = ovs_nla_get_identifier(&new_flow->id, a[OVS_FLOW_ATTR_UFID],
-				       &new_flow->key, log);
+				       key, log);
 	if (error)
-		goto err_kfree_flow;
-
-	/* unmasked key is needed to match when ufid is not used. */
-	if (ovs_identifier_is_key(&new_flow->id))
-		match.key = new_flow->id.unmasked_key;
-
-	ovs_flow_mask_key(&new_flow->key, &new_flow->key, true, &mask);
+		goto err_kfree_key;
 
 	/* Validate actions. */
 	error = ovs_nla_copy_actions(net, a[OVS_FLOW_ATTR_ACTIONS],
 				     &new_flow->key, &acts, log);
 	if (error) {
 		OVS_NLERR(log, "Flow actions may not be safe on all matching packets.");
-		goto err_kfree_flow;
+		goto err_kfree_key;
 	}
 
 	reply = ovs_flow_cmd_alloc_info(acts, &new_flow->id, info, false,
@@ -996,7 +1020,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	if (ovs_identifier_is_ufid(&new_flow->id))
 		flow = ovs_flow_tbl_lookup_ufid(&dp->table, &new_flow->id);
 	if (!flow)
-		flow = ovs_flow_tbl_lookup(&dp->table, &new_flow->key);
+		flow = ovs_flow_tbl_lookup(&dp->table, key);
 	if (likely(!flow)) {
 		rcu_assign_pointer(new_flow->sf_acts, acts);
 
@@ -1066,6 +1090,8 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 
 	if (reply)
 		ovs_notify(&dp_flow_genl_family, reply, info);
+
+	kfree(key);
 	return 0;
 
 err_unlock_ovs:
@@ -1073,6 +1099,8 @@ err_unlock_ovs:
 	kfree_skb(reply);
 err_kfree_acts:
 	ovs_nla_free_flow_actions(acts);
+err_kfree_key:
+	kfree(key);
 err_kfree_flow:
 	ovs_flow_free(new_flow, false);
 error:
@@ -1584,22 +1612,77 @@ static void ovs_dp_reset_user_features(struct sk_buff *skb,
 	if (IS_ERR(dp))
 		return;
 
-	WARN(dp->user_features, "Dropping previously announced user features\n");
+	pr_warn("%s: Dropping previously announced user features\n",
+		ovs_dp_name(dp));
 	dp->user_features = 0;
 }
 
 DEFINE_STATIC_KEY_FALSE(tc_recirc_sharing_support);
 
+static int ovs_dp_set_upcall_portids(struct datapath *dp,
+			      const struct nlattr *ids)
+{
+	struct dp_nlsk_pids *old, *dp_nlsk_pids;
+
+	if (!nla_len(ids) || nla_len(ids) % sizeof(u32))
+		return -EINVAL;
+
+	old = ovsl_dereference(dp->upcall_portids);
+
+	dp_nlsk_pids = kmalloc(sizeof(*dp_nlsk_pids) + nla_len(ids),
+			       GFP_KERNEL);
+	if (!dp_nlsk_pids)
+		return -ENOMEM;
+
+	dp_nlsk_pids->n_pids = nla_len(ids) / sizeof(u32);
+	nla_memcpy(dp_nlsk_pids->pids, ids, nla_len(ids));
+
+	rcu_assign_pointer(dp->upcall_portids, dp_nlsk_pids);
+
+	kfree_rcu(old, rcu);
+
+	return 0;
+}
+
+u32 ovs_dp_get_upcall_portid(const struct datapath *dp, uint32_t cpu_id)
+{
+	struct dp_nlsk_pids *dp_nlsk_pids;
+
+	dp_nlsk_pids = rcu_dereference(dp->upcall_portids);
+
+	if (dp_nlsk_pids) {
+		if (cpu_id < dp_nlsk_pids->n_pids) {
+			return dp_nlsk_pids->pids[cpu_id];
+		} else if (dp_nlsk_pids->n_pids > 0 &&
+			   cpu_id >= dp_nlsk_pids->n_pids) {
+			/* If the number of netlink PIDs is mismatched with
+			 * the number of CPUs as seen by the kernel, log this
+			 * and send the upcall to an arbitrary socket (0) in
+			 * order to not drop packets
+			 */
+			pr_info_ratelimited("cpu_id mismatch with handler threads");
+			return dp_nlsk_pids->pids[cpu_id %
+						  dp_nlsk_pids->n_pids];
+		} else {
+			return 0;
+		}
+	} else {
+		return 0;
+	}
+}
+
 static int ovs_dp_change(struct datapath *dp, struct nlattr *a[])
 {
 	u32 user_features = 0;
+	int err;
 
 	if (a[OVS_DP_ATTR_USER_FEATURES]) {
 		user_features = nla_get_u32(a[OVS_DP_ATTR_USER_FEATURES]);
 
 		if (user_features & ~(OVS_DP_F_VPORT_PIDS |
 				      OVS_DP_F_UNALIGNED |
-				      OVS_DP_F_TC_RECIRC_SHARING))
+				      OVS_DP_F_TC_RECIRC_SHARING |
+				      OVS_DP_F_DISPATCH_UPCALL_PER_CPU))
 			return -EOPNOTSUPP;
 
 #if !IS_ENABLED(CONFIG_NET_TC_SKB_EXT)
@@ -1619,6 +1702,15 @@ static int ovs_dp_change(struct datapath *dp, struct nlattr *a[])
 	}
 
 	dp->user_features = user_features;
+
+	if (dp->user_features & OVS_DP_F_DISPATCH_UPCALL_PER_CPU &&
+	    a[OVS_DP_ATTR_PER_CPU_PIDS]) {
+		/* Upcall Netlink Port IDs have been updated */
+		err = ovs_dp_set_upcall_portids(dp,
+						a[OVS_DP_ATTR_PER_CPU_PIDS]);
+		if (err)
+			return err;
+	}
 
 	if (dp->user_features & OVS_DP_F_TC_RECIRC_SHARING)
 		static_branch_enable(&tc_recirc_sharing_support);
@@ -1725,7 +1817,7 @@ static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
 				ovs_dp_reset_user_features(skb, info);
 		}
 
-		goto err_unlock_and_destroy_meters;
+		goto err_destroy_portids;
 	}
 
 	err = ovs_dp_cmd_fill_info(dp, reply, info->snd_portid,
@@ -1740,6 +1832,8 @@ static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	ovs_notify(&dp_datapath_genl_family, reply, info);
 	return 0;
 
+err_destroy_portids:
+	kfree(rcu_dereference_raw(dp->upcall_portids));
 err_unlock_and_destroy_meters:
 	ovs_unlock();
 	ovs_meters_exit(dp);

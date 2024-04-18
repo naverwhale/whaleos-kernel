@@ -107,6 +107,16 @@
 	.endm
 #endif
 
+#if __LINUX_ARM_ARCH__ < 7
+	.macro	dsb, args
+	mcr	p15, 0, r0, c7, c10, 4
+	.endm
+
+	.macro	isb, args
+	mcr	p15, 0, r0, c7, c5, 4
+	.endm
+#endif
+
 	.macro asm_trace_hardirqs_off, save=1
 #if defined(CONFIG_TRACE_IRQFLAGS)
 	.if \save
@@ -259,7 +269,8 @@
  */
 #define ALT_UP(instr...)					\
 	.pushsection ".alt.smp.init", "a"			;\
-	.long	9998b						;\
+	.align	2						;\
+	.long	9998b - .					;\
 9997:	instr							;\
 	.if . - 9997b == 2					;\
 		nop						;\
@@ -270,7 +281,8 @@
 	.popsection
 #define ALT_UP_B(label)					\
 	.pushsection ".alt.smp.init", "a"			;\
-	.long	9998b						;\
+	.align	2						;\
+	.long	9998b - .					;\
 	W(b)	. + (label - 9998b)					;\
 	.popsection
 #else
@@ -311,6 +323,23 @@
 	.else
 	ALT_UP(W(nop))
 	.endif
+#endif
+	.endm
+
+/*
+ * Raw SMP data memory barrier
+ */
+	.macro	__smp_dmb mode
+#if __LINUX_ARM_ARCH__ >= 7
+	.ifeqs "\mode","arm"
+	dmb	ish
+	.else
+	W(dmb)	ish
+	.endif
+#elif __LINUX_ARM_ARCH__ == 6
+	mcr	p15, 0, r0, c7, c10, 5	@ dmb
+#else
+	.error "Incompatible SMP platform"
 #endif
 	.endm
 
@@ -576,6 +605,23 @@ THUMB(	orr	\reg , \reg , #PSR_T_BIT	)
 	 */
 	.macro		str_l, src:req, sym:req, tmp:req, cond
 	__adldst_l	str, \src, \sym, \tmp, \cond
+	.endm
+
+	/*
+	 * rev_l - byte-swap a 32-bit value
+	 *
+	 * @val: source/destination register
+	 * @tmp: scratch register
+	 */
+	.macro		rev_l, val:req, tmp:req
+	.if		__LINUX_ARM_ARCH__ < 6
+	eor		\tmp, \val, \val, ror #16
+	bic		\tmp, \tmp, #0x00ff0000
+	mov		\val, \val, ror #8
+	eor		\val, \val, \tmp, lsr #8
+	.else
+	rev		\val, \val
+	.endif
 	.endm
 
 #endif /* __ASM_ASSEMBLER_H__ */

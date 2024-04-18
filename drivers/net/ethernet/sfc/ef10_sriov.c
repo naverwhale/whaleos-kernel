@@ -122,8 +122,7 @@ static void efx_ef10_sriov_free_vf_vports(struct efx_nic *efx)
 		struct ef10_vf *vf = nic_data->vf + i;
 
 		/* If VF is assigned, do not free the vport  */
-		if (vf->pci_dev &&
-		    vf->pci_dev->dev_flags & PCI_DEV_FLAGS_ASSIGNED)
+		if (vf->pci_dev && pci_is_dev_assigned(vf->pci_dev))
 			continue;
 
 		if (vf->vport_assigned) {
@@ -207,9 +206,7 @@ static int efx_ef10_sriov_alloc_vf_vswitching(struct efx_nic *efx)
 
 	return 0;
 fail:
-	efx_ef10_sriov_free_vf_vports(efx);
-	kfree(nic_data->vf);
-	nic_data->vf = NULL;
+	efx_ef10_sriov_free_vf_vswitching(efx);
 	return rc;
 }
 
@@ -411,8 +408,9 @@ fail1:
 static int efx_ef10_pci_sriov_disable(struct efx_nic *efx, bool force)
 {
 	struct pci_dev *dev = efx->pci_dev;
+	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	unsigned int vfs_assigned = pci_vfs_assigned(dev);
-	int rc = 0;
+	int i, rc = 0;
 
 	if (vfs_assigned && !force) {
 		netif_info(efx, drv, efx->net_dev, "VFs are assigned to guests; "
@@ -420,10 +418,13 @@ static int efx_ef10_pci_sriov_disable(struct efx_nic *efx, bool force)
 		return -EBUSY;
 	}
 
-	if (!vfs_assigned)
+	if (!vfs_assigned) {
+		for (i = 0; i < efx->vf_count; i++)
+			nic_data->vf[i].pci_dev = NULL;
 		pci_disable_sriov(dev);
-	else
+	} else {
 		rc = -EBUSY;
+	}
 
 	efx_ef10_sriov_free_vf_vswitching(efx);
 	efx->vf_count = 0;
@@ -449,7 +450,9 @@ void efx_ef10_sriov_fini(struct efx_nic *efx)
 	int rc;
 
 	if (!nic_data->vf) {
-		/* Remove any un-assigned orphaned VFs */
+		/* Remove any un-assigned orphaned VFs. This can happen if the PF driver
+		 * was unloaded while any VF was assigned to a guest (using Xen, only).
+		 */
 		if (pci_num_vf(efx->pci_dev) && !pci_vfs_assigned(efx->pci_dev))
 			pci_disable_sriov(efx->pci_dev);
 		return;
@@ -524,7 +527,7 @@ int efx_ef10_sriov_set_vf_mac(struct efx_nic *efx, int vf_i, u8 *mac)
 			goto fail;
 
 		if (vf->efx)
-			ether_addr_copy(vf->efx->net_dev->dev_addr, mac);
+			eth_hw_addr_set(vf->efx->net_dev, mac);
 	}
 
 	ether_addr_copy(vf->mac, mac);

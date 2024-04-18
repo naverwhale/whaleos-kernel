@@ -10,6 +10,8 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#define pr_fmt(fmt) "ACPI: PM: " fmt
+
 #include <linux/acpi.h>
 #include <linux/export.h>
 #include <linux/mutex.h>
@@ -20,9 +22,6 @@
 
 #include "fan.h"
 #include "internal.h"
-
-#define _COMPONENT	ACPI_POWER_COMPONENT
-ACPI_MODULE_NAME("device_pm");
 
 /**
  * acpi_power_state_string - String representation of ACPI device power state.
@@ -131,8 +130,8 @@ int acpi_device_get_power(struct acpi_device *device, int *state)
 	*state = result;
 
  out:
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device [%s] power state is %s\n",
-			  device->pnp.bus_id, acpi_power_state_string(*state)));
+	dev_dbg(&device->dev, "Device power state is %s\n",
+		acpi_power_state_string(*state));
 
 	return 0;
 }
@@ -175,9 +174,8 @@ int acpi_device_set_power(struct acpi_device *device, int state)
 
 	/* There is a special case for D0 addressed below. */
 	if (state > ACPI_STATE_D0 && state == device->power.state) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device [%s] already in %s\n",
-				  device->pnp.bus_id,
-				  acpi_power_state_string(state)));
+		dev_dbg(&device->dev, "Device already in %s\n",
+			acpi_power_state_string(state));
 		return 0;
 	}
 
@@ -277,10 +275,8 @@ int acpi_device_set_power(struct acpi_device *device, int state)
 			 acpi_power_state_string(target_state));
 	} else {
 		device->power.state = target_state;
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-				  "Device [%s] transitioned to %s\n",
-				  device->pnp.bus_id,
-				  acpi_power_state_string(target_state)));
+		dev_dbg(&device->dev, "Power state changed to %s\n",
+			acpi_power_state_string(target_state));
 	}
 
 	return result;
@@ -431,6 +427,33 @@ bool acpi_bus_power_manageable(acpi_handle handle)
 	return result ? false : device->flags.power_manageable;
 }
 EXPORT_SYMBOL(acpi_bus_power_manageable);
+
+static int acpi_power_up_if_adr_present(struct acpi_device *adev, void *not_used)
+{
+	if (!(adev->flags.power_manageable && adev->pnp.type.bus_address))
+		return 0;
+
+	acpi_handle_debug(adev->handle, "Power state: %s\n",
+			  acpi_power_state_string(adev->power.state));
+
+	if (adev->power.state == ACPI_STATE_D3_COLD)
+		return acpi_device_set_power(adev, ACPI_STATE_D0);
+
+	return 0;
+}
+
+/**
+ * acpi_dev_power_up_children_with_adr - Power up childres with valid _ADR
+ * @adev: Parent ACPI device object.
+ *
+ * Change the power states of the direct children of @adev that are in D3cold
+ * and hold valid _ADR objects to D0 in order to allow bus (e.g. PCI)
+ * enumeration code to access them.
+ */
+void acpi_dev_power_up_children_with_adr(struct acpi_device *adev)
+{
+	acpi_dev_for_each_child(adev, acpi_power_up_if_adr_present, NULL);
+}
 
 #ifdef CONFIG_PM
 static DEFINE_MUTEX(acpi_pm_notifier_lock);
@@ -637,7 +660,22 @@ static int acpi_dev_pm_get_state(struct device *dev, struct acpi_device *adev,
 		d_min = ret;
 		wakeup = device_may_wakeup(dev) && adev->wakeup.flags.valid
 			&& adev->wakeup.sleep_state >= target_state;
+	} else if (device_may_wakeup(dev) && dev->power.wakeirq) {
+		/*
+		 * The ACPI subsystem doesn't manage the wake bit for IRQs
+		 * defined with ExclusiveAndWake and SharedAndWake. Instead we
+		 * expect them to be managed via the PM subsystem. Drivers
+		 * should call dev_pm_set_wake_irq to register an IRQ as a wake
+		 * source.
+		 *
+		 * If a device has a wake IRQ attached we need to check the
+		 * _S0W method to get the correct wake D-state. Otherwise we
+		 * end up putting the device into D3Cold which will more than
+		 * likely disable wake functionality.
+		 */
+		wakeup = true;
 	} else {
+		/* ACPI GPE is specified in _PRW. */
 		wakeup = adev->wakeup.flags.valid;
 	}
 
@@ -758,16 +796,26 @@ static int __acpi_device_wakeup_enable(struct acpi_device *adev,
 
 	mutex_lock(&acpi_wakeup_lock);
 
-	if (wakeup->enable_count >= INT_MAX) {
-		acpi_handle_info(adev->handle, "Wakeup enable count out of bounds!\n");
-		goto out;
-	}
+	/*
+	 * If the device wakeup power is already enabled, disable it and enable
+	 * it again in case it depends on the configuration of subordinate
+	 * devices and the conditions have changed since it was enabled last
+	 * time.
+	 */
 	if (wakeup->enable_count > 0)
-		goto inc;
+		acpi_disable_wakeup_device_power(adev);
 
 	error = acpi_enable_wakeup_device_power(adev, target_state);
-	if (error)
+	if (error) {
+		if (wakeup->enable_count > 0) {
+			acpi_disable_gpe(wakeup->gpe_device, wakeup->gpe_number);
+			wakeup->enable_count = 0;
+		}
 		goto out;
+	}
+
+	if (wakeup->enable_count > 0)
+		goto inc;
 
 	status = acpi_enable_gpe(wakeup->gpe_device, wakeup->gpe_number);
 	if (ACPI_FAILURE(status)) {
@@ -780,7 +828,10 @@ static int __acpi_device_wakeup_enable(struct acpi_device *adev,
 			  (unsigned int)wakeup->gpe_number);
 
 inc:
-	wakeup->enable_count++;
+	if (wakeup->enable_count < INT_MAX)
+		wakeup->enable_count++;
+	else
+		acpi_handle_info(adev->handle, "Wakeup enable count out of bounds!\n");
 
 out:
 	mutex_unlock(&acpi_wakeup_lock);
@@ -958,6 +1009,7 @@ EXPORT_SYMBOL_GPL(acpi_dev_resume);
 int acpi_subsys_runtime_suspend(struct device *dev)
 {
 	int ret = pm_generic_runtime_suspend(dev);
+
 	return ret ? ret : acpi_dev_suspend(dev, true);
 }
 EXPORT_SYMBOL_GPL(acpi_subsys_runtime_suspend);
@@ -972,6 +1024,7 @@ EXPORT_SYMBOL_GPL(acpi_subsys_runtime_suspend);
 int acpi_subsys_runtime_resume(struct device *dev)
 {
 	int ret = acpi_dev_resume(dev);
+
 	return ret ? ret : pm_generic_runtime_resume(dev);
 }
 EXPORT_SYMBOL_GPL(acpi_subsys_runtime_resume);
@@ -1192,6 +1245,7 @@ EXPORT_SYMBOL_GPL(acpi_subsys_freeze);
 int acpi_subsys_restore_early(struct device *dev)
 {
 	int ret = acpi_dev_resume(dev);
+
 	return ret ? ret : pm_generic_restore_early(dev);
 }
 EXPORT_SYMBOL_GPL(acpi_subsys_restore_early);
@@ -1356,4 +1410,62 @@ int acpi_dev_pm_attach(struct device *dev, bool power_on)
 	return 1;
 }
 EXPORT_SYMBOL_GPL(acpi_dev_pm_attach);
+
+/**
+ * acpi_storage_d3 - Check if D3 should be used in the suspend path
+ * @dev: Device to check
+ *
+ * Return %true if the platform firmware wants @dev to be programmed
+ * into D3hot or D3cold (if supported) in the suspend path, or %false
+ * when there is no specific preference. On some platforms, if this
+ * hint is ignored, @dev may remain unresponsive after suspending the
+ * platform as a whole.
+ *
+ * Although the property has storage in the name it actually is
+ * applied to the PCIe slot and plugging in a non-storage device the
+ * same platform restrictions will likely apply.
+ */
+bool acpi_storage_d3(struct device *dev)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 val;
+
+	if (force_storage_d3())
+		return true;
+
+	if (!adev)
+		return false;
+	if (fwnode_property_read_u8(acpi_fwnode_handle(adev), "StorageD3Enable",
+			&val))
+		return false;
+	return val == 1;
+}
+EXPORT_SYMBOL_GPL(acpi_storage_d3);
+
+/**
+ * acpi_dev_state_d0 - Tell if the device is in D0 power state
+ * @dev: Physical device the ACPI power state of which to check
+ *
+ * On a system without ACPI, return true. On a system with ACPI, return true if
+ * the current ACPI power state of the device is D0, or false otherwise.
+ *
+ * Note that the power state of a device is not well-defined after it has been
+ * passed to acpi_device_set_power() and before that function returns, so it is
+ * not valid to ask for the ACPI power state of the device in that time frame.
+ *
+ * This function is intended to be used in a driver's probe or remove
+ * function. See Documentation/firmware-guide/acpi/low-power-probe.rst for
+ * more information.
+ */
+bool acpi_dev_state_d0(struct device *dev)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+
+	if (!adev)
+		return true;
+
+	return adev->power.state == ACPI_STATE_D0;
+}
+EXPORT_SYMBOL_GPL(acpi_dev_state_d0);
+
 #endif /* CONFIG_PM */

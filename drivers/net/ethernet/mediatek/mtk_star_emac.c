@@ -30,7 +30,6 @@
 #define MTK_STAR_WAIT_TIMEOUT			300
 #define MTK_STAR_MAX_FRAME_SIZE			1514
 #define MTK_STAR_SKB_ALIGNMENT			16
-#define MTK_STAR_NAPI_WEIGHT			64
 #define MTK_STAR_HASHTABLE_MC_LIMIT		256
 #define MTK_STAR_HASHTABLE_SIZE_MAX		512
 
@@ -1162,7 +1161,7 @@ static const struct net_device_ops mtk_star_netdev_ops = {
 	.ndo_start_xmit		= mtk_star_netdev_start_xmit,
 	.ndo_get_stats64	= mtk_star_netdev_get_stats64,
 	.ndo_set_rx_mode	= mtk_star_set_rx_mode,
-	.ndo_do_ioctl		= mtk_star_netdev_ioctl,
+	.ndo_eth_ioctl		= mtk_star_netdev_ioctl,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -1551,7 +1550,7 @@ static int mtk_star_probe(struct platform_device *pdev)
 	ndev->netdev_ops = &mtk_star_netdev_ops;
 	ndev->ethtool_ops = &mtk_star_ethtool_ops;
 
-	netif_napi_add(ndev, &priv->napi, mtk_star_poll, MTK_STAR_NAPI_WEIGHT);
+	netif_napi_add(ndev, &priv->napi, mtk_star_poll, NAPI_POLL_WEIGHT);
 
 	return devm_register_netdev(dev, ndev);
 }

@@ -634,6 +634,7 @@ static int ti_ads7950_probe(struct spi_device *spi)
 	st->chip.label = dev_name(&st->spi->dev);
 	st->chip.parent = &st->spi->dev;
 	st->chip.owner = THIS_MODULE;
+	st->chip.can_sleep = true;
 	st->chip.base = -1;
 	st->chip.ngpio = TI_ADS7950_NUM_GPIOS;
 	st->chip.get_direction = ti_ads7950_get_direction;
@@ -662,7 +663,7 @@ error_destroy_mutex:
 	return ret;
 }
 
-static int ti_ads7950_remove(struct spi_device *spi)
+static void ti_ads7950_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ti_ads7950_state *st = iio_priv(indio_dev);
@@ -672,8 +673,6 @@ static int ti_ads7950_remove(struct spi_device *spi)
 	iio_triggered_buffer_cleanup(indio_dev);
 	regulator_disable(st->reg);
 	mutex_destroy(&st->slock);
-
-	return 0;
 }
 
 static const struct spi_device_id ti_ads7950_id[] = {

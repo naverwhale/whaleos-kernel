@@ -7,7 +7,6 @@
 #include <linux/crash_dump.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/version.h>
 #include <linux/device.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -40,12 +39,8 @@
 #include "qede.h"
 #include "qede_ptp.h"
 
-static char version[] =
-	"QLogic FastLinQ 4xxxx Ethernet Driver qede " DRV_MODULE_VERSION "\n";
-
 MODULE_DESCRIPTION("QLogic FastLinQ 4xxxx Ethernet Driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(DRV_MODULE_VERSION);
 
 static uint debug;
 module_param(debug, uint, 0);
@@ -259,7 +254,7 @@ int __init qede_init(void)
 {
 	int ret;
 
-	pr_info("qede_init: %s\n", version);
+	pr_info("qede init: QLogic FastLinQ 4xxxx Ethernet Driver qede\n");
 
 	qede_forced_speed_maps_init();
 
@@ -312,6 +307,8 @@ void qede_fill_by_demand_stats(struct qede_dev *edev)
 	struct qed_eth_stats stats;
 
 	edev->ops->get_vport_stats(edev->cdev, &stats);
+
+	spin_lock(&edev->stats_lock);
 
 	p_common->no_buff_discards = stats.common.no_buff_discards;
 	p_common->packet_too_big_discard = stats.common.packet_too_big_discard;
@@ -410,6 +407,8 @@ void qede_fill_by_demand_stats(struct qede_dev *edev)
 		p_ah->tx_1519_to_max_byte_packets =
 		    stats.ah.tx_1519_to_max_byte_packets;
 	}
+
+	spin_unlock(&edev->stats_lock);
 }
 
 static void qede_get_stats64(struct net_device *dev,
@@ -418,8 +417,9 @@ static void qede_get_stats64(struct net_device *dev,
 	struct qede_dev *edev = netdev_priv(dev);
 	struct qede_stats_common *p_common;
 
-	qede_fill_by_demand_stats(edev);
 	p_common = &edev->stats.common;
+
+	spin_lock(&edev->stats_lock);
 
 	stats->rx_packets = p_common->rx_ucast_pkts + p_common->rx_mcast_pkts +
 			    p_common->rx_bcast_pkts;
@@ -440,6 +440,8 @@ static void qede_get_stats64(struct net_device *dev,
 		stats->collisions = edev->stats.bb.tx_total_collisions;
 	stats->rx_crc_errors = p_common->rx_crc_errors;
 	stats->rx_frame_errors = p_common->rx_align_errors;
+
+	spin_unlock(&edev->stats_lock);
 }
 
 #ifdef CONFIG_QED_SRIOV
@@ -645,7 +647,7 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_set_mac_address	= qede_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_change_mtu		= qede_change_mtu,
-	.ndo_do_ioctl		= qede_ioctl,
+	.ndo_eth_ioctl		= qede_ioctl,
 	.ndo_tx_timeout		= qede_tx_timeout,
 #ifdef CONFIG_QED_SRIOV
 	.ndo_set_vf_mac		= qede_set_vf_mac,
@@ -663,8 +665,6 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_get_vf_config	= qede_get_vf_config,
 	.ndo_set_vf_rate	= qede_set_vf_rate,
 #endif
-	.ndo_udp_tunnel_add	= udp_tunnel_nic_add_port,
-	.ndo_udp_tunnel_del	= udp_tunnel_nic_del_port,
 	.ndo_features_check	= qede_features_check,
 	.ndo_bpf		= qede_xdp,
 #ifdef CONFIG_RFS_ACCEL
@@ -688,8 +688,6 @@ static const struct net_device_ops qede_netdev_vf_ops = {
 	.ndo_fix_features	= qede_fix_features,
 	.ndo_set_features	= qede_set_features,
 	.ndo_get_stats64	= qede_get_stats64,
-	.ndo_udp_tunnel_add	= udp_tunnel_nic_add_port,
-	.ndo_udp_tunnel_del	= udp_tunnel_nic_del_port,
 	.ndo_features_check	= qede_features_check,
 };
 
@@ -707,8 +705,6 @@ static const struct net_device_ops qede_netdev_vf_xdp_ops = {
 	.ndo_fix_features	= qede_fix_features,
 	.ndo_set_features	= qede_set_features,
 	.ndo_get_stats64	= qede_get_stats64,
-	.ndo_udp_tunnel_add	= udp_tunnel_nic_add_port,
-	.ndo_udp_tunnel_del	= udp_tunnel_nic_del_port,
 	.ndo_features_check	= qede_features_check,
 	.ndo_bpf		= qede_xdp,
 	.ndo_xdp_xmit		= qede_xdp_transmit,
@@ -847,7 +843,7 @@ static void qede_init_ndev(struct qede_dev *edev)
 	ndev->max_mtu = QEDE_MAX_JUMBO_PACKET_SIZE;
 
 	/* Set network device HW mac */
-	ether_addr_copy(edev->ndev->dev_addr, edev->dev_info.common.hw_mac);
+	eth_hw_addr_set(edev->ndev, edev->dev_info.common.hw_mac);
 
 	ndev->mtu = edev->dev_info.common.mtu;
 }
@@ -917,6 +913,16 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 	if (!edev->fp_array) {
 		DP_NOTICE(edev, "fp array allocation failed\n");
 		goto err;
+	}
+
+	if (!edev->coal_entry) {
+		edev->coal_entry = kcalloc(QEDE_MAX_RSS_CNT(edev),
+					   sizeof(*edev->coal_entry),
+					   GFP_KERNEL);
+		if (!edev->coal_entry) {
+			DP_ERR(edev, "coalesce entry allocation failed\n");
+			goto err;
+		}
 	}
 
 	fp_combined = QEDE_QUEUE_CNT(edev) - fp_rx - edev->fp_num_tx;
@@ -1001,6 +1007,23 @@ static void qede_unlock(struct qede_dev *edev)
 	rtnl_unlock();
 }
 
+static void qede_periodic_task(struct work_struct *work)
+{
+	struct qede_dev *edev = container_of(work, struct qede_dev,
+					     periodic_task.work);
+
+	qede_fill_by_demand_stats(edev);
+	schedule_delayed_work(&edev->periodic_task, edev->stats_coal_ticks);
+}
+
+static void qede_init_periodic_task(struct qede_dev *edev)
+{
+	INIT_DELAYED_WORK(&edev->periodic_task, qede_periodic_task);
+	spin_lock_init(&edev->stats_lock);
+	edev->stats_coal_usecs = USEC_PER_SEC;
+	edev->stats_coal_ticks = usecs_to_jiffies(USEC_PER_SEC);
+}
+
 static void qede_sp_task(struct work_struct *work)
 {
 	struct qede_dev *edev = container_of(work, struct qede_dev,
@@ -1020,6 +1043,7 @@ static void qede_sp_task(struct work_struct *work)
 	 */
 
 	if (test_and_clear_bit(QEDE_SP_RECOVERY, &edev->sp_flags)) {
+		cancel_delayed_work_sync(&edev->periodic_task);
 #ifdef CONFIG_QED_SRIOV
 		/* SRIOV must be disabled outside the lock to avoid a deadlock.
 		 * The recovery of the active VFs is currently not supported.
@@ -1154,10 +1178,6 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 	/* Start the Slowpath-process */
 	memset(&sp_params, 0, sizeof(sp_params));
 	sp_params.int_mode = QED_INT_MODE_MSIX;
-	sp_params.drv_major = QEDE_MAJOR_VERSION;
-	sp_params.drv_minor = QEDE_MINOR_VERSION;
-	sp_params.drv_rev = QEDE_REVISION_VERSION;
-	sp_params.drv_eng = QEDE_ENGINEERING_VERSION;
 	strlcpy(sp_params.name, "qede LAN", QED_DRV_VER_STR_SIZE);
 	rc = qed_ops->common->slowpath_start(cdev, &sp_params);
 	if (rc) {
@@ -1181,19 +1201,17 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 		edev->devlink = qed_ops->common->devlink_register(cdev);
 		if (IS_ERR(edev->devlink)) {
 			DP_NOTICE(edev, "Cannot register devlink\n");
+			rc = PTR_ERR(edev->devlink);
 			edev->devlink = NULL;
-			/* Go on, we can live without devlink */
+			goto err3;
 		}
 	} else {
 		struct net_device *ndev = pci_get_drvdata(pdev);
+		struct qed_devlink *qdl;
 
 		edev = netdev_priv(ndev);
-
-		if (edev->devlink) {
-			struct qed_devlink *qdl = devlink_priv(edev->devlink);
-
-			qdl->cdev = cdev;
-		}
+		qdl = devlink_priv(edev->devlink);
+		qdl->cdev = cdev;
 		edev->cdev = cdev;
 		memset(&edev->stats, 0, sizeof(edev->stats));
 		memcpy(&edev->dev_info, &dev_info, sizeof(dev_info));
@@ -1216,6 +1234,7 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 		 */
 		INIT_DELAYED_WORK(&edev->sp_task, qede_sp_task);
 		mutex_init(&edev->qede_lock);
+		qede_init_periodic_task(edev);
 
 		rc = register_netdev(edev->ndev);
 		if (rc) {
@@ -1240,6 +1259,11 @@ static int __qede_probe(struct pci_dev *pdev, u32 dp_module, u8 dp_level,
 	edev->rx_copybreak = QEDE_RX_HDR_SIZE;
 
 	qede_log_probe(edev);
+
+	/* retain user config (for example - after recovery) */
+	if (edev->stats_coal_usecs)
+		schedule_delayed_work(&edev->periodic_task, 0);
+
 	return 0;
 
 err4:
@@ -1308,6 +1332,7 @@ static void __qede_remove(struct pci_dev *pdev, enum qede_remove_mode mode)
 		unregister_netdev(ndev);
 
 		cancel_delayed_work_sync(&edev->sp_task);
+		cancel_delayed_work_sync(&edev->periodic_task);
 
 		edev->ops->common->set_power_state(cdev, PCI_D0);
 
@@ -1334,8 +1359,10 @@ static void __qede_remove(struct pci_dev *pdev, enum qede_remove_mode mode)
 	 * [e.g., QED register callbacks] won't break anything when
 	 * accessing the netdevice.
 	 */
-	if (mode != QEDE_REMOVE_RECOVERY)
+	if (mode != QEDE_REMOVE_RECOVERY) {
+		kfree(edev->coal_entry);
 		free_netdev(ndev);
+	}
 
 	dev_info(&pdev->dev, "Ending qede_remove successfully\n");
 }
@@ -1770,7 +1797,7 @@ static void qede_init_fp(struct qede_dev *edev)
 
 			/* Driver have no error path from here */
 			WARN_ON(xdp_rxq_info_reg(&fp->rxq->xdp_rxq, edev->ndev,
-						 fp->rxq->rxq_id) < 0);
+						 fp->rxq->rxq_id, 0) < 0);
 
 			if (xdp_rxq_info_reg_mem_model(&fp->rxq->xdp_rxq,
 						       MEM_TYPE_PAGE_ORDER0,
@@ -1902,6 +1929,12 @@ static int qede_req_msix_irqs(struct qede_dev *edev)
 				 &edev->fp_array[i]);
 		if (rc) {
 			DP_ERR(edev, "Request fp %d irq failed\n", i);
+#ifdef CONFIG_RFS_ACCEL
+			if (edev->ndev->rx_cpu_rmap)
+				free_irq_cpu_rmap(edev->ndev->rx_cpu_rmap);
+
+			edev->ndev->rx_cpu_rmap = NULL;
+#endif
 			qede_sync_free_irqs(edev);
 			return rc;
 		}
@@ -2294,6 +2327,15 @@ static void qede_unload(struct qede_dev *edev, enum qede_unload_mode mode,
 
 		rc = qede_stop_queues(edev);
 		if (rc) {
+#ifdef CONFIG_RFS_ACCEL
+			if (edev->dev_info.common.b_arfs_capable) {
+				qede_poll_for_freeing_arfs_filters(edev);
+				if (edev->ndev->rx_cpu_rmap)
+					free_irq_cpu_rmap(edev->ndev->rx_cpu_rmap);
+
+				edev->ndev->rx_cpu_rmap = NULL;
+			}
+#endif
 			qede_sync_free_irqs(edev);
 			goto out;
 		}
@@ -2343,8 +2385,9 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 		     bool is_locked)
 {
 	struct qed_link_params link_params;
+	struct ethtool_coalesce coal = {};
 	u8 num_tc;
-	int rc;
+	int rc, i;
 
 	DP_INFO(edev, "Starting qede load\n");
 
@@ -2405,6 +2448,18 @@ static int qede_load(struct qede_dev *edev, enum qede_load_mode mode,
 
 	edev->state = QEDE_STATE_OPEN;
 
+	coal.rx_coalesce_usecs = QED_DEFAULT_RX_USECS;
+	coal.tx_coalesce_usecs = QED_DEFAULT_TX_USECS;
+
+	for_each_queue(i) {
+		if (edev->coal_entry[i].isvalid) {
+			coal.rx_coalesce_usecs = edev->coal_entry[i].rxc;
+			coal.tx_coalesce_usecs = edev->coal_entry[i].txc;
+		}
+		__qede_unlock(edev);
+		qede_set_per_coalesce(edev->ndev, i, &coal);
+		__qede_lock(edev);
+	}
 	DP_INFO(edev, "Ending successfully qede load\n");
 
 	goto out;
@@ -2610,8 +2665,10 @@ static void qede_generic_hw_err_handler(struct qede_dev *edev)
 		  "Generic sleepable HW error handling started - err_flags 0x%lx\n",
 		  edev->err_flags);
 
-	if (edev->devlink)
+	if (edev->devlink) {
+		DP_NOTICE(edev, "Reporting fatal error to devlink\n");
 		edev->ops->common->report_fatal_error(edev->devlink, edev->last_err_type);
+	}
 
 	clear_bit(QEDE_ERR_IS_HANDLED, &edev->err_flags);
 
@@ -2633,6 +2690,8 @@ static void qede_set_hw_err_flags(struct qede_dev *edev,
 	case QED_HW_ERR_FW_ASSERT:
 		set_bit(QEDE_ERR_ATTN_CLR_EN, &err_flags);
 		set_bit(QEDE_ERR_GET_DBG_INFO, &err_flags);
+		/* make this error as recoverable and start recovery*/
+		set_bit(QEDE_ERR_IS_RECOVERABLE, &err_flags);
 		break;
 
 	default:
@@ -2773,9 +2832,12 @@ static void qede_get_eth_tlv_data(void *dev, void *data)
 }
 
 /**
- * qede_io_error_detected - called when PCI error is detected
+ * qede_io_error_detected(): Called when PCI error is detected
+ *
  * @pdev: Pointer to PCI device
  * @state: The current pci connection state
+ *
+ *Return: pci_ers_result_t.
  *
  * This function is called after a PCI bus error affecting
  * this device has been detected.

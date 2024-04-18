@@ -742,9 +742,16 @@ static int wm8960_configure_clocking(struct snd_soc_component *component)
 	int i, j, k;
 	int ret;
 
-	if (!(iface1 & (1<<6))) {
-		dev_dbg(component->dev,
-			"Codec is slave mode, no need to configure clock\n");
+	/*
+	 * For Slave mode clocking should still be configured,
+	 * so this if statement should be removed, but some platform
+	 * may not work if the sysclk is not configured, to avoid such
+	 * compatible issue, just add '!wm8960->sysclk' condition in
+	 * this if statement.
+	 */
+	if (!(iface1 & (1 << 6)) && !wm8960->sysclk) {
+		dev_warn(component->dev,
+			 "slave mode, but proceeding with no clock configuration\n");
 		return 0;
 	}
 
@@ -1361,7 +1368,6 @@ static const struct snd_soc_component_driver soc_component_dev_wm8960 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config wm8960_regmap = {
@@ -1394,8 +1400,7 @@ static void wm8960_set_pdata_from_of(struct i2c_client *i2c,
 				   ARRAY_SIZE(pdata->hp_cfg));
 }
 
-static int wm8960_i2c_probe(struct i2c_client *i2c,
-			    const struct i2c_device_id *id)
+static int wm8960_i2c_probe(struct i2c_client *i2c)
 {
 	struct wm8960_data *pdata = dev_get_platdata(&i2c->dev);
 	struct wm8960_priv *wm8960;
@@ -1493,7 +1498,7 @@ static struct i2c_driver wm8960_i2c_driver = {
 		.name = "wm8960",
 		.of_match_table = wm8960_of_match,
 	},
-	.probe =    wm8960_i2c_probe,
+	.probe_new = wm8960_i2c_probe,
 	.remove =   wm8960_i2c_remove,
 	.id_table = wm8960_i2c_id,
 };

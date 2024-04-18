@@ -277,6 +277,7 @@ struct imx208 {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *hblank;
+	struct v4l2_ctrl *exposure;
 	struct v4l2_ctrl *vflip;
 	struct v4l2_ctrl *hflip;
 
@@ -296,6 +297,9 @@ struct imx208 {
 	/* OTP data */
 	bool otp_read;
 	char otp_data[IMX208_OTP_SIZE];
+
+	/* True if the device has been identified */
+	bool identified;
 };
 
 static inline struct imx208 *to_imx208(struct v4l2_subdev *_sd)
@@ -395,7 +399,7 @@ static int imx208_write_regs(struct imx208 *imx208,
 static int imx208_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct v4l2_mbus_framefmt *try_fmt =
-		v4l2_subdev_get_try_format(sd, fh->pad, 0);
+		v4l2_subdev_get_try_format(sd, fh->state, 0);
 
 	/* Initialize try_fmt */
 	try_fmt->width = supported_modes[0].width;
@@ -432,7 +436,16 @@ static int imx208_set_ctrl(struct v4l2_ctrl *ctrl)
 	struct imx208 *imx208 =
 		container_of(ctrl->handler, struct imx208, ctrl_handler);
 	struct i2c_client *client = v4l2_get_subdevdata(&imx208->sd);
+	s64 max;
 	int ret;
+
+	if (ctrl->id == V4L2_CID_VBLANK) {
+		/* Update max exposure while meeting expected vblanking */
+		max = imx208->cur_mode->height + ctrl->val - 8;
+		__v4l2_ctrl_modify_range(imx208->exposure,
+					 imx208->exposure->minimum,
+					 max, imx208->exposure->step, max);
+	}
 
 	/*
 	 * Applying V4L2 control value only happens
@@ -500,7 +513,7 @@ static const struct v4l2_ctrl_config imx208_digital_gain_control = {
 };
 
 static int imx208_enum_mbus_code(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct imx208 *imx208 = to_imx208(sd);
@@ -514,7 +527,7 @@ static int imx208_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int imx208_enum_frame_size(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct imx208 *imx208 = to_imx208(sd);
@@ -544,11 +557,12 @@ static void imx208_mode_to_pad_format(struct imx208 *imx208,
 }
 
 static int __imx208_get_pad_format(struct imx208 *imx208,
-				   struct v4l2_subdev_pad_config *cfg,
+				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *fmt)
 {
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt->format = *v4l2_subdev_get_try_format(&imx208->sd, cfg,
+		fmt->format = *v4l2_subdev_get_try_format(&imx208->sd,
+							  sd_state,
 							  fmt->pad);
 	else
 		imx208_mode_to_pad_format(imx208, imx208->cur_mode, fmt);
@@ -557,21 +571,21 @@ static int __imx208_get_pad_format(struct imx208 *imx208,
 }
 
 static int imx208_get_pad_format(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx208 *imx208 = to_imx208(sd);
 	int ret;
 
 	mutex_lock(&imx208->imx208_mx);
-	ret = __imx208_get_pad_format(imx208, cfg, fmt);
+	ret = __imx208_get_pad_format(imx208, sd_state, fmt);
 	mutex_unlock(&imx208->imx208_mx);
 
 	return ret;
 }
 
 static int imx208_set_pad_format(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx208 *imx208 = to_imx208(sd);
@@ -590,7 +604,7 @@ static int imx208_set_pad_format(struct v4l2_subdev *sd,
 				      fmt->format.width, fmt->format.height);
 	imx208_mode_to_pad_format(imx208, mode, fmt);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		*v4l2_subdev_get_try_format(sd, cfg, fmt->pad) = fmt->format;
+		*v4l2_subdev_get_try_format(sd, sd_state, fmt->pad) = fmt->format;
 	} else {
 		imx208->cur_mode = mode;
 		__v4l2_ctrl_s_ctrl(imx208->link_freq, mode->link_freq_index);
@@ -618,12 +632,44 @@ static int imx208_set_pad_format(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static int imx208_identify_module(struct imx208 *imx208)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&imx208->sd);
+	int ret;
+	u32 val;
+
+	if (imx208->identified)
+		return 0;
+
+	ret = imx208_read_reg(imx208, IMX208_REG_CHIP_ID,
+			      2, &val);
+	if (ret) {
+		dev_err(&client->dev, "failed to read chip id %x\n",
+			IMX208_CHIP_ID);
+		return ret;
+	}
+
+	if (val != IMX208_CHIP_ID) {
+		dev_err(&client->dev, "chip id mismatch: %x!=%x\n",
+			IMX208_CHIP_ID, val);
+		return -EIO;
+	}
+
+	imx208->identified = true;
+
+	return 0;
+}
+
 /* Start streaming */
 static int imx208_start_streaming(struct imx208 *imx208)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&imx208->sd);
 	const struct imx208_reg_list *reg_list;
 	int ret, link_freq_index;
+
+	ret = imx208_identify_module(imx208);
+	if (ret)
+		return ret;
 
 	/* Setup PLL */
 	link_freq_index = imx208->cur_mode->link_freq_index;
@@ -751,29 +797,6 @@ error:
 }
 
 /* Verify chip ID */
-static int imx208_identify_module(struct imx208 *imx208)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(&imx208->sd);
-	int ret;
-	u32 val;
-
-	ret = imx208_read_reg(imx208, IMX208_REG_CHIP_ID,
-			      2, &val);
-	if (ret) {
-		dev_err(&client->dev, "failed to read chip id %x\n",
-			IMX208_CHIP_ID);
-		return ret;
-	}
-
-	if (val != IMX208_CHIP_ID) {
-		dev_err(&client->dev, "chip id mismatch: %x!=%x\n",
-			IMX208_CHIP_ID, val);
-		return -EIO;
-	}
-
-	return 0;
-}
-
 static const struct v4l2_subdev_video_ops imx208_video_ops = {
 	.s_stream = imx208_set_stream,
 };
@@ -812,6 +835,10 @@ static int imx208_read_otp(struct imx208 *imx208)
 		goto out_unlock;
 	}
 
+	ret = imx208_identify_module(imx208);
+	if (ret)
+		goto out_pm_put;
+
 	/* Write register address */
 	msgs[0].addr = client->addr;
 	msgs[0].flags = 0;
@@ -830,6 +857,7 @@ static int imx208_read_otp(struct imx208 *imx208)
 		ret = 0;
 	}
 
+out_pm_put:
 	pm_runtime_put(&client->dev);
 
 out_unlock:
@@ -913,9 +941,11 @@ static int imx208_init_controls(struct imx208 *imx208)
 		imx208->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	exposure_max = imx208->cur_mode->vts_def - 8;
-	v4l2_ctrl_new_std(ctrl_hdlr, &imx208_ctrl_ops, V4L2_CID_EXPOSURE,
-			  IMX208_EXPOSURE_MIN, exposure_max,
-			  IMX208_EXPOSURE_STEP, IMX208_EXPOSURE_DEFAULT);
+	imx208->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx208_ctrl_ops,
+					     V4L2_CID_EXPOSURE,
+					     IMX208_EXPOSURE_MIN, exposure_max,
+					     IMX208_EXPOSURE_STEP,
+					     IMX208_EXPOSURE_DEFAULT);
 
 	imx208->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx208_ctrl_ops,
 					  V4L2_CID_HFLIP, 0, 1, 1, 0);
@@ -960,6 +990,7 @@ static int imx208_probe(struct i2c_client *client)
 {
 	struct imx208 *imx208;
 	int ret;
+	bool full_power;
 	u32 val = 0;
 
 	device_property_read_u32(&client->dev, "clock-frequency", &val);
@@ -977,11 +1008,14 @@ static int imx208_probe(struct i2c_client *client)
 	/* Initialize subdev */
 	v4l2_i2c_subdev_init(&imx208->sd, client, &imx208_subdev_ops);
 
-	/* Check module identity */
-	ret = imx208_identify_module(imx208);
-	if (ret) {
-		dev_err(&client->dev, "failed to find sensor: %d", ret);
-		goto error_probe;
+	full_power = acpi_dev_state_d0(&client->dev);
+	if (full_power) {
+		/* Check module identity */
+		ret = imx208_identify_module(imx208);
+		if (ret) {
+			dev_err(&client->dev, "failed to find sensor: %d", ret);
+			goto error_probe;
+		}
 	}
 
 	/* Set default mode to max resolution */
@@ -1006,7 +1040,7 @@ static int imx208_probe(struct i2c_client *client)
 		goto error_handler_free;
 	}
 
-	ret = v4l2_async_register_subdev_sensor_common(&imx208->sd);
+	ret = v4l2_async_register_subdev_sensor(&imx208->sd);
 	if (ret < 0)
 		goto error_media_entity;
 
@@ -1016,7 +1050,9 @@ static int imx208_probe(struct i2c_client *client)
 		goto error_async_subdev;
 	}
 
-	pm_runtime_set_active(&client->dev);
+	/* Set the device's state to active if it's in D0 state. */
+	if (full_power)
+		pm_runtime_set_active(&client->dev);
 	pm_runtime_enable(&client->dev);
 	pm_runtime_idle(&client->dev);
 
@@ -1076,6 +1112,7 @@ static struct i2c_driver imx208_i2c_driver = {
 	},
 	.probe_new = imx208_probe,
 	.remove = imx208_remove,
+	.flags = I2C_DRV_ACPI_WAIVE_D0_PROBE,
 };
 
 module_i2c_driver(imx208_i2c_driver);

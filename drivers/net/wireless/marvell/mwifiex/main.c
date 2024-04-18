@@ -135,7 +135,7 @@ static int mwifiex_unregister(struct mwifiex_adapter *adapter)
 	if (adapter->if_ops.cleanup_if)
 		adapter->if_ops.cleanup_if(adapter);
 
-	del_timer_sync(&adapter->cmd_timer);
+	timer_shutdown_sync(&adapter->cmd_timer);
 
 	/* Free private structures */
 	for (i = 0; i < adapter->priv_num; i++) {
@@ -180,7 +180,7 @@ static void mwifiex_queue_rx_work(struct mwifiex_adapter *adapter)
 		spin_unlock_bh(&adapter->rx_proc_lock);
 	} else {
 		spin_unlock_bh(&adapter->rx_proc_lock);
-		queue_work(adapter->rx_workqueue, &adapter->rx_work);
+		kthread_queue_work(adapter->rx_thread, &adapter->rx_work);
 	}
 }
 
@@ -503,10 +503,10 @@ static void mwifiex_terminate_workqueue(struct mwifiex_adapter *adapter)
 		adapter->workqueue = NULL;
 	}
 
-	if (adapter->rx_workqueue) {
-		flush_workqueue(adapter->rx_workqueue);
-		destroy_workqueue(adapter->rx_workqueue);
-		adapter->rx_workqueue = NULL;
+	if (adapter->rx_thread) {
+		kthread_flush_worker(adapter->rx_thread);
+		kthread_destroy_worker(adapter->rx_thread);
+		adapter->rx_thread = NULL;
 	}
 }
 
@@ -598,12 +598,14 @@ static int _mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 	}
 
 	rtnl_lock();
+	wiphy_lock(adapter->wiphy);
 	/* Create station interface by default */
 	wdev = mwifiex_add_virtual_intf(adapter->wiphy, "mlan%d", NET_NAME_ENUM,
 					NL80211_IFTYPE_STATION, NULL);
 	if (IS_ERR(wdev)) {
 		mwifiex_dbg(adapter, ERROR,
 			    "cannot create default STA interface\n");
+		wiphy_unlock(adapter->wiphy);
 		rtnl_unlock();
 		goto err_add_intf;
 	}
@@ -614,6 +616,7 @@ static int _mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 		if (IS_ERR(wdev)) {
 			mwifiex_dbg(adapter, ERROR,
 				    "cannot create AP interface\n");
+			wiphy_unlock(adapter->wiphy);
 			rtnl_unlock();
 			goto err_add_intf;
 		}
@@ -625,10 +628,12 @@ static int _mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 		if (IS_ERR(wdev)) {
 			mwifiex_dbg(adapter, ERROR,
 				    "cannot create p2p client interface\n");
+			wiphy_unlock(adapter->wiphy);
 			rtnl_unlock();
 			goto err_add_intf;
 		}
 	}
+	wiphy_unlock(adapter->wiphy);
 	rtnl_unlock();
 
 	mwifiex_drv_get_driver_version(adapter, fmt, sizeof(fmt) - 1);
@@ -1367,7 +1372,7 @@ int is_command_pending(struct mwifiex_adapter *adapter)
  *
  * It handles the RX operations.
  */
-static void mwifiex_rx_work_queue(struct work_struct *work)
+static void mwifiex_rx_work_queue(struct kthread_work *work)
 {
 	struct mwifiex_adapter *adapter =
 		container_of(work, struct mwifiex_adapter, rx_work);
@@ -1441,8 +1446,17 @@ static void mwifiex_uninit_sw(struct mwifiex_adapter *adapter)
 			continue;
 		rtnl_lock();
 		if (priv->netdev &&
-		    priv->wdev.iftype != NL80211_IFTYPE_UNSPECIFIED)
+		    priv->wdev.iftype != NL80211_IFTYPE_UNSPECIFIED) {
+			/*
+			 * Close the netdev now, because if we do it later, the
+			 * netdev notifiers will need to acquire the wiphy lock
+			 * again --> deadlock.
+			 */
+			dev_close(priv->wdev.netdev);
+			wiphy_lock(adapter->wiphy);
 			mwifiex_del_virtual_intf(adapter->wiphy, &priv->wdev);
+			wiphy_unlock(adapter->wiphy);
+		}
 		rtnl_unlock();
 	}
 
@@ -1455,7 +1469,7 @@ static void mwifiex_uninit_sw(struct mwifiex_adapter *adapter)
 }
 
 /*
- * This function gets called during PCIe function level reset.
+ * This function can be used for shutting down the adapter SW.
  */
 int mwifiex_shutdown_sw(struct mwifiex_adapter *adapter)
 {
@@ -1483,7 +1497,7 @@ int mwifiex_shutdown_sw(struct mwifiex_adapter *adapter)
 }
 EXPORT_SYMBOL_GPL(mwifiex_shutdown_sw);
 
-/* This function gets called during PCIe function level reset. Required
+/* This function can be used for reinitting the adapter SW. Required
  * code is extracted from mwifiex_add_card()
  */
 int
@@ -1518,13 +1532,10 @@ mwifiex_reinit_sw(struct mwifiex_adapter *adapter)
 	INIT_WORK(&adapter->main_work, mwifiex_main_work_queue);
 
 	if (adapter->rx_work_enabled) {
-		adapter->rx_workqueue = alloc_workqueue("MWIFIEX_RX_WORK_QUEUE",
-							WQ_HIGHPRI |
-							WQ_MEM_RECLAIM |
-							WQ_UNBOUND, 1);
-		if (!adapter->rx_workqueue)
+		adapter->rx_thread = kthread_create_worker(0, "MWIFIEX_RX");
+		if (IS_ERR(adapter->rx_thread))
 			goto err_kmalloc;
-		INIT_WORK(&adapter->rx_work, mwifiex_rx_work_queue);
+		kthread_init_work(&adapter->rx_work, mwifiex_rx_work_queue);
 	}
 
 	/* Register the device. Fill up the private data structure with
@@ -1673,14 +1684,11 @@ mwifiex_add_card(void *card, struct completion *fw_done,
 	INIT_WORK(&adapter->main_work, mwifiex_main_work_queue);
 
 	if (adapter->rx_work_enabled) {
-		adapter->rx_workqueue = alloc_workqueue("MWIFIEX_RX_WORK_QUEUE",
-							WQ_HIGHPRI |
-							WQ_MEM_RECLAIM |
-							WQ_UNBOUND, 1);
-		if (!adapter->rx_workqueue)
+		adapter->rx_thread = kthread_create_worker(0, "MWIFIEX_RX");
+		if (!adapter->rx_thread)
 			goto err_kmalloc;
 
-		INIT_WORK(&adapter->rx_work, mwifiex_rx_work_queue);
+		kthread_init_work(&adapter->rx_work, mwifiex_rx_work_queue);
 	}
 
 	/* Register the device. Fill up the private data structure with relevant

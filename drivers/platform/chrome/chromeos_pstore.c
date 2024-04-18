@@ -42,6 +42,50 @@ static const struct dmi_system_id chromeos_pstore_dmi_table[] __initconst = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "ZGB"),
 		},
 	},
+#ifdef CONFIG_WHALEBOOK
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14U30P-AAAAK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14UN30P-AAAAK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14T30Q-XXXXK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14TN30Q-XXXXK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14TN30S-XXXXK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "14TW30S-XXXXK"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Poin2 Lab."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "POIN2W12"),
+		},
+	},
+#endif
 	{ }
 };
 MODULE_DEVICE_TABLE(dmi, chromeos_pstore_dmi_table);
@@ -52,8 +96,13 @@ MODULE_DEVICE_TABLE(dmi, chromeos_pstore_dmi_table);
  * contents for panic logs, etc.
  */
 static struct ramoops_platform_data chromeos_ramoops_data = {
+#ifdef CONFIG_WHALEBOOK
+	.mem_size	= CONFIG_WHALEBOOK_PSTORE_SIZE,
+	.mem_address	= CONFIG_WHALEBOOK_PSTORE_BASE,
+#else
 	.mem_size	= 0x100000,
 	.mem_address	= 0xf00000,
+#endif
 	.record_size	= 0x40000,
 	.console_size	= 0x20000,
 	.ftrace_size	= 0x20000,

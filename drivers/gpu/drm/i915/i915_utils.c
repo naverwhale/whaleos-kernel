@@ -3,6 +3,8 @@
  * Copyright © 2019 Intel Corporation
  */
 
+#include <linux/device.h>
+
 #include <drm/drm_drv.h>
 
 #include "i915_drv.h"
@@ -30,9 +32,10 @@ __i915_printk(struct drm_i915_private *dev_priv, const char *level,
 	vaf.va = &args;
 
 	if (is_error)
-		drm_dev_printk(kdev, level, "%pV", &vaf);
+		dev_printk(level, kdev, "%pV", &vaf);
 	else
-		drm_err(&dev_priv->drm, "%pV", &vaf);
+		dev_printk(level, kdev, "[" DRM_NAME ":%ps] %pV",
+			   __builtin_return_address(0), &vaf);
 
 	va_end(args);
 
@@ -112,4 +115,13 @@ void set_timer_ms(struct timer_list *t, unsigned long timeout)
 
 	/* Keep t->expires = 0 reserved to indicate a canceled timer. */
 	mod_timer(t, jiffies + timeout ?: 1);
+}
+
+bool i915_vtd_active(struct drm_i915_private *i915)
+{
+	if (device_iommu_mapped(i915->drm.dev))
+		return true;
+
+	/* Running as a guest, we assume the host is enforcing VT'd */
+	return i915_run_as_guest();
 }

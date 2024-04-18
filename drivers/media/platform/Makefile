@@ -3,6 +3,7 @@
 # Makefile for the video capture/playback device drivers.
 #
 
+obj-$(CONFIG_VIDEO_ALLEGRO_DVT)		+= allegro-dvt/
 obj-$(CONFIG_VIDEO_ASPEED)		+= aspeed-video.o
 obj-$(CONFIG_VIDEO_CADENCE)		+= cadence/
 obj-$(CONFIG_VIDEO_VIA_CAMERA) += via-camera.o
@@ -20,6 +21,7 @@ obj-$(CONFIG_VIDEO_MX2_EMMAPRP)		+= mx2_emmaprp.o
 obj-$(CONFIG_VIDEO_CODA)		+= coda/
 
 obj-$(CONFIG_VIDEO_IMX_PXP)		+= imx-pxp.o
+obj-$(CONFIG_VIDEO_IMX8_JPEG)		+= imx-jpeg/
 
 obj-$(CONFIG_VIDEO_MEM2MEM_DEINTERLACE)	+= m2m-deinterlace.o
 
@@ -65,31 +67,26 @@ obj-$(CONFIG_VIDEO_RCAR_VIN)		+= rcar-vin/
 
 obj-$(CONFIG_VIDEO_ATMEL_ISC)		+= atmel/
 obj-$(CONFIG_VIDEO_ATMEL_ISI)		+= atmel/
+obj-$(CONFIG_VIDEO_ATMEL_XISC)		+= atmel/
 
 obj-$(CONFIG_VIDEO_STM32_DCMI)		+= stm32/
 
-obj-$(CONFIG_VIDEO_MEDIATEK_VPU)	+= mtk-vpu/
+obj-$(CONFIG_VIDEO_MEDIATEK_VPU)	+= mediatek/vpu/
 
-obj-$(CONFIG_VIDEO_MEDIATEK_VCODEC)	+= mtk-vcodec/
+obj-$(CONFIG_VIDEO_MEDIATEK_VCODEC)	+= mediatek/vcodec/
 
-obj-$(CONFIG_VIDEO_MEDIATEK_MDP)	+= mtk-mdp/
+obj-$(CONFIG_VIDEO_MEDIATEK_MDP)	+= mediatek/mdp/
 
-obj-$(CONFIG_VIDEO_MEDIATEK_MDP3)	+= mtk-mdp3/
+obj-$(CONFIG_VIDEO_MEDIATEK_MDP3)	+= mediatek/mdp3/
 
-obj-$(CONFIG_VIDEO_MEDIATEK_JPEG)	+= mtk-jpeg/
-
-obj-$(CONFIG_VIDEO_MEDIATEK_ISP_PASS1)	+= mtk-isp/isp_50/
-
-obj-$(CONFIG_VIDEO_MEDIATEK_FD)		+= mtk-isp/fd/
-
-obj-$(CONFIG_VIDEO_MEDIATEK_ISP_DIP)	+= mtk-isp/isp_50/
-
-obj-$(CONFIG_MTK_SENINF)		+= mtk-isp/isp_50/
+obj-$(CONFIG_VIDEO_MEDIATEK_JPEG)	+= mediatek/jpeg/
 
 obj-$(CONFIG_VIDEO_QCOM_CAMSS)		+= qcom/camss/
 
 obj-$(CONFIG_VIDEO_QCOM_VENUS)		+= qcom/venus/
 
 obj-y					+= sunxi/
+
+obj-$(CONFIG_VIDEO_MESON_GE2D)		+= meson/ge2d/
 
 obj-y					+= camx/

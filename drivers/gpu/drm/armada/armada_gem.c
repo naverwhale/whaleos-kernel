@@ -105,11 +105,11 @@ armada_gem_linear_back(struct drm_device *dev, struct armada_gem_object *obj)
 	}
 
 	/*
-	 * We could grab something from CMA if it's enabled, but that
+	 * We could grab something from DMA if it's enabled, but that
 	 * involves building in a problem:
 	 *
-	 * CMA's interface uses dma_alloc_coherent(), which provides us
-	 * with an CPU virtual address and a device address.
+	 * GEM DMA helper interface uses dma_alloc_coherent(), which provides
+	 * us with an CPU virtual address and a device address.
 	 *
 	 * The CPU virtual address may be either an address in the kernel
 	 * direct mapped region (for example, as it would be on x86) or
@@ -336,7 +336,7 @@ int armada_gem_pwrite_ioctl(struct drm_device *dev, void *data,
 	struct drm_armada_gem_pwrite *args = data;
 	struct armada_gem_object *dobj;
 	char __user *ptr;
-	int ret;
+	int ret = 0;
 
 	DRM_DEBUG_DRIVER("handle %u off %u size %u ptr 0x%llx\n",
 		args->handle, args->offset, args->size, args->ptr);
@@ -349,9 +349,8 @@ int armada_gem_pwrite_ioctl(struct drm_device *dev, void *data,
 	if (!access_ok(ptr, args->size))
 		return -EFAULT;
 
-	ret = fault_in_pages_readable(ptr, args->size);
-	if (ret)
-		return ret;
+	if (fault_in_readable(ptr, args->size))
+		return -EFAULT;
 
 	dobj = armada_gem_object_lookup(file, args->handle);
 	if (dobj == NULL)

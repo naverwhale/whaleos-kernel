@@ -176,7 +176,7 @@ static void dra7xx_pcie_enable_interrupts(struct dra7xx_pcie *dra7xx)
 	dra7xx_pcie_enable_msi_interrupts(dra7xx);
 }
 
-static int dra7xx_pcie_host_init(struct pcie_port *pp)
+static int dra7xx_pcie_host_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct dra7xx_pcie *dra7xx = to_dra7xx_pcie(pci);
@@ -200,11 +200,11 @@ static const struct irq_domain_ops intx_domain_ops = {
 	.xlate = pci_irqd_intx_xlate,
 };
 
-static int dra7xx_pcie_handle_msi(struct pcie_port *pp, int index)
+static int dra7xx_pcie_handle_msi(struct dw_pcie_rp *pp, int index)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	unsigned long val;
-	int pos, irq;
+	int pos;
 
 	val = dw_pcie_readl_dbi(pci, PCIE_MSI_INTR0_STATUS +
 				   (index * MSI_REG_CTRL_BLOCK_SIZE));
@@ -213,9 +213,8 @@ static int dra7xx_pcie_handle_msi(struct pcie_port *pp, int index)
 
 	pos = find_next_bit(&val, MAX_MSI_IRQS_PER_CTRL, 0);
 	while (pos != MAX_MSI_IRQS_PER_CTRL) {
-		irq = irq_find_mapping(pp->irq_domain,
-				       (index * MAX_MSI_IRQS_PER_CTRL) + pos);
-		generic_handle_irq(irq);
+		generic_handle_domain_irq(pp->irq_domain,
+					  (index * MAX_MSI_IRQS_PER_CTRL) + pos);
 		pos++;
 		pos = find_next_bit(&val, MAX_MSI_IRQS_PER_CTRL, pos);
 	}
@@ -223,7 +222,7 @@ static int dra7xx_pcie_handle_msi(struct pcie_port *pp, int index)
 	return 1;
 }
 
-static void dra7xx_pcie_handle_msi_irq(struct pcie_port *pp)
+static void dra7xx_pcie_handle_msi_irq(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	int ret, i, count, num_ctrls;
@@ -254,10 +253,10 @@ static void dra7xx_pcie_msi_irq_handler(struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	struct dra7xx_pcie *dra7xx;
+	struct dw_pcie_rp *pp;
 	struct dw_pcie *pci;
-	struct pcie_port *pp;
 	unsigned long reg;
-	u32 virq, bit;
+	u32 bit;
 
 	chained_irq_enter(chip, desc);
 
@@ -276,11 +275,8 @@ static void dra7xx_pcie_msi_irq_handler(struct irq_desc *desc)
 	case INTB:
 	case INTC:
 	case INTD:
-		for_each_set_bit(bit, &reg, PCI_NUM_INTX) {
-			virq = irq_find_mapping(dra7xx->irq_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-		}
+		for_each_set_bit(bit, &reg, PCI_NUM_INTX)
+			generic_handle_domain_irq(dra7xx->irq_domain, bit);
 		break;
 	}
 
@@ -346,7 +342,7 @@ static irqreturn_t dra7xx_pcie_irq_handler(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
-static int dra7xx_pcie_init_irq_domain(struct pcie_port *pp)
+static int dra7xx_pcie_init_irq_domain(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
@@ -443,8 +439,8 @@ static const struct dw_pcie_ep_ops pcie_ep_ops = {
 	.get_features = dra7xx_pcie_get_features,
 };
 
-static int __init dra7xx_add_pcie_ep(struct dra7xx_pcie *dra7xx,
-				     struct platform_device *pdev)
+static int dra7xx_add_pcie_ep(struct dra7xx_pcie *dra7xx,
+			      struct platform_device *pdev)
 {
 	int ret;
 	struct dw_pcie_ep *ep;
@@ -472,12 +468,12 @@ static int __init dra7xx_add_pcie_ep(struct dra7xx_pcie *dra7xx,
 	return 0;
 }
 
-static int __init dra7xx_add_pcie_port(struct dra7xx_pcie *dra7xx,
-				       struct platform_device *pdev)
+static int dra7xx_add_pcie_port(struct dra7xx_pcie *dra7xx,
+				struct platform_device *pdev)
 {
 	int ret;
 	struct dw_pcie *pci = dra7xx->pci;
-	struct pcie_port *pp = &pci->pp;
+	struct dw_pcie_rp *pp = &pci->pp;
 	struct device *dev = pci->dev;
 
 	pp->irq = platform_get_irq(pdev, 1);
@@ -485,7 +481,7 @@ static int __init dra7xx_add_pcie_port(struct dra7xx_pcie *dra7xx,
 		return pp->irq;
 
 	/* MSI IRQ is muxed */
-	pp->msi_irq = -ENODEV;
+	pp->msi_irq[0] = -ENODEV;
 
 	ret = dra7xx_pcie_init_irq_domain(pp);
 	if (ret < 0)
@@ -682,7 +678,7 @@ static int dra7xx_pcie_configure_two_lane(struct device *dev,
 	return 0;
 }
 
-static int __init dra7xx_pcie_probe(struct platform_device *pdev)
+static int dra7xx_pcie_probe(struct platform_device *pdev)
 {
 	u32 reg;
 	int ret;
@@ -938,6 +934,7 @@ static const struct dev_pm_ops dra7xx_pcie_pm_ops = {
 };
 
 static struct platform_driver dra7xx_pcie_driver = {
+	.probe = dra7xx_pcie_probe,
 	.driver = {
 		.name	= "dra7-pcie",
 		.of_match_table = of_dra7xx_pcie_match,
@@ -946,4 +943,4 @@ static struct platform_driver dra7xx_pcie_driver = {
 	},
 	.shutdown = dra7xx_pcie_shutdown,
 };
-builtin_platform_driver_probe(dra7xx_pcie_driver, dra7xx_pcie_probe);
+builtin_platform_driver(dra7xx_pcie_driver);

@@ -252,11 +252,15 @@ static int __init omap_cf_probe(struct platform_device *pdev)
 	/* pcmcia layer only remaps "real" memory */
 	cf->socket.io_offset = (unsigned long)
 			ioremap(cf->phys_cf + SZ_4K, SZ_2K);
-	if (!cf->socket.io_offset)
+	if (!cf->socket.io_offset) {
+		status = -ENOMEM;
 		goto fail1;
+	}
 
-	if (!request_mem_region(cf->phys_cf, SZ_8K, driver_name))
+	if (!request_mem_region(cf->phys_cf, SZ_8K, driver_name)) {
+		status = -ENXIO;
 		goto fail1;
+	}
 
 	/* NOTE:  CF conflicts with MMC1 */
 	omap_cfg_reg(W11_1610_CF_CD1);
@@ -319,7 +323,7 @@ static int __exit omap_cf_remove(struct platform_device *pdev)
 
 	cf->active = 0;
 	pcmcia_unregister_socket(&cf->socket);
-	del_timer_sync(&cf->timer);
+	timer_shutdown_sync(&cf->timer);
 	iounmap((void __iomem *) cf->socket.io_offset);
 	release_mem_region(cf->phys_cf, SZ_8K);
 	free_irq(cf->irq, cf);

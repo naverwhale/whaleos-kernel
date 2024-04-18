@@ -1,4 +1,4 @@
-/**
+/*
  * OMAP1 Dual-Mode Timers - platform device registration
  *
  * Contains first level initialization routines which internally
@@ -165,7 +165,7 @@ err_free_pdata:
 	kfree(pdata);
 
 err_free_pdev:
-	platform_device_unregister(pdev);
+	platform_device_put(pdev);
 
 	return ret;
 }

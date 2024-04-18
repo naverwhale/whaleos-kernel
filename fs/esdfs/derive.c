@@ -73,7 +73,7 @@ void esdfs_derive_perms(struct dentry *dentry)
 {
 	struct esdfs_inode_info *inode_i = ESDFS_I(dentry->d_inode);
 	bool is_root;
-	int ret;
+	int __maybe_unused ret;
 	kuid_t appid;
 	struct qstr q_Download = QSTR_LITERAL("Download");
 	struct qstr q_Android = QSTR_LITERAL("Android");
@@ -409,7 +409,7 @@ static kuid_t esdfs_get_derived_lower_uid(struct esdfs_sb_info *sbi,
 		if (test_opt(sbi, SPECIAL_DOWNLOAD))
 			return make_kuid(sbi->dl_ns,
 					 sbi->lower_dl_perms.raw_uid);
-		/* fall through */
+		fallthrough;
 	case ESDFS_TREE_ROOT:
 	case ESDFS_TREE_MEDIA:
 	case ESDFS_TREE_ANDROID:
@@ -446,7 +446,7 @@ static kgid_t esdfs_get_derived_lower_gid(struct esdfs_sb_info *sbi,
 		if (test_opt(sbi, SPECIAL_DOWNLOAD))
 			return make_kgid(sbi->dl_ns,
 					 sbi->lower_dl_perms.raw_gid);
-		/* fall through */
+		fallthrough;
 	case ESDFS_TREE_ROOT:
 	case ESDFS_TREE_MEDIA:
 	case ESDFS_TREE_ANDROID:
@@ -511,8 +511,8 @@ retry_deleg:
 		error = security_path_chown(&path, newattrs.ia_uid,
 						newattrs.ia_gid);
 		if (!error)
-			error = notify_change(path.dentry, &newattrs,
-						&delegated_inode);
+			error = notify_change(&init_user_ns, path.dentry,
+						&newattrs, &delegated_inode);
 		inode_unlock(inode);
 		if (delegated_inode) {
 			error = break_deleg_wait(&delegated_inode);
@@ -596,8 +596,8 @@ int esdfs_derive_mkdir_contents(struct dentry *dir_dentry)
 	mode = S_IFREG;
 	lower_parent_dentry = lock_parent(lower_dentry);
 	esdfs_set_lower_mode(ESDFS_SB(dir_dentry->d_sb), inode_i, &mode);
-	err = vfs_create(lower_dir_path.dentry->d_inode, lower_dentry, mode,
-			 true);
+	err = vfs_create(&init_user_ns, lower_dir_path.dentry->d_inode,
+			 lower_dentry, mode, true);
 	unlock_dir(lower_parent_dentry);
 	dput(lower_dentry);
 

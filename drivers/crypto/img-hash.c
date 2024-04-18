@@ -19,7 +19,8 @@
 
 #include <crypto/internal/hash.h>
 #include <crypto/md5.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
 
 #define CR_RESET			0
 #define CR_RESET_SET			1
@@ -357,12 +358,16 @@ static int img_hash_dma_init(struct img_hash_dev *hdev)
 static void img_hash_dma_task(unsigned long d)
 {
 	struct img_hash_dev *hdev = (struct img_hash_dev *)d;
-	struct img_hash_request_ctx *ctx = ahash_request_ctx(hdev->req);
+	struct img_hash_request_ctx *ctx;
 	u8 *addr;
 	size_t nbytes, bleft, wsend, len, tbc;
 	struct scatterlist tsg;
 
-	if (!hdev->req || !ctx->sg)
+	if (!hdev->req)
+		return;
+
+	ctx = ahash_request_ctx(hdev->req);
+	if (!ctx->sg)
 		return;
 
 	addr = sg_virt(ctx->sg);
@@ -962,8 +967,6 @@ static int img_hash_probe(struct platform_device *pdev)
 	hdev->io_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(hdev->io_base)) {
 		err = PTR_ERR(hdev->io_base);
-		dev_err(dev, "can't ioremap, returned %d\n", err);
-
 		goto res_err;
 	}
 
@@ -971,7 +974,6 @@ static int img_hash_probe(struct platform_device *pdev)
 	hash_res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	hdev->cpu_addr = devm_ioremap_resource(dev, hash_res);
 	if (IS_ERR(hdev->cpu_addr)) {
-		dev_err(dev, "can't ioremap write port\n");
 		err = PTR_ERR(hdev->cpu_addr);
 		goto res_err;
 	}

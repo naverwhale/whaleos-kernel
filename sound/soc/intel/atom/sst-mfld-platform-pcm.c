@@ -127,7 +127,7 @@ static void sst_fill_alloc_params(struct snd_pcm_substream *substream,
 	snd_pcm_uframes_t period_size;
 	ssize_t periodbytes;
 	ssize_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
-	u32 buffer_addr = virt_to_phys(substream->runtime->dma_area);
+	u32 buffer_addr = substream->runtime->dma_addr;
 
 	channels = substream->runtime->channels;
 	period_size = substream->runtime->period_size;
@@ -255,28 +255,17 @@ static int sst_platform_alloc_stream(struct snd_pcm_substream *substream,
 static void sst_period_elapsed(void *arg)
 {
 	struct snd_pcm_substream *substream = arg;
-	struct snd_soc_pcm_runtime *rtd;
 	struct sst_runtime_stream *stream;
-	struct pcm_stream_info *str_info;
 	int status;
-	int ret_val;
 
 	if (!substream || !substream->runtime)
 		return;
-	rtd = substream->private_data;
 	stream = substream->runtime->private_data;
 	if (!stream)
 		return;
 	status = sst_get_stream_status(stream);
 	if (status != SST_PLATFORM_RUNNING)
 		return;
-	str_info = &stream->stream_info;
-
-	ret_val = stream->ops->stream_read_tstamp(sst->dev, str_info);
-	if (ret_val) {
-		dev_err(rtd->dev, "sst: err code = %d\n", ret_val);
-		return;
-	}
 	snd_pcm_period_elapsed(substream);
 }
 
@@ -650,16 +639,33 @@ static snd_pcm_uframes_t sst_soc_pointer(struct snd_soc_component *component,
 					 struct snd_pcm_substream *substream)
 {
 	struct sst_runtime_stream *stream;
-	int status;
+	int ret_val, status;
 	struct pcm_stream_info *str_info;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 
 	stream = substream->runtime->private_data;
 	status = sst_get_stream_status(stream);
 	if (status == SST_PLATFORM_INIT)
 		return 0;
 	str_info = &stream->stream_info;
-	substream->runtime->delay = str_info->pcm_delay;
+	ret_val = stream->ops->stream_read_tstamp(sst->dev, str_info);
+	if (ret_val) {
+		dev_err(rtd->dev, "sst: error code = %d\n", ret_val);
+		return ret_val;
+	}
 	return str_info->buffer_ptr;
+}
+
+static snd_pcm_sframes_t sst_soc_delay(struct snd_soc_component *component,
+				       struct snd_pcm_substream *substream)
+{
+	struct sst_runtime_stream *stream = substream->runtime->private_data;
+	struct pcm_stream_info *str_info = &stream->stream_info;
+
+	if (sst_get_stream_status(stream) == SST_PLATFORM_INIT)
+		return 0;
+
+	return str_info->pcm_delay;
 }
 
 static int sst_soc_pcm_new(struct snd_soc_component *component,
@@ -700,6 +706,7 @@ static const struct snd_soc_component_driver sst_soc_platform_drv  = {
 	.open		= sst_soc_open,
 	.trigger	= sst_soc_trigger,
 	.pointer	= sst_soc_pointer,
+	.delay		= sst_soc_delay,
 	.compress_ops	= &sst_platform_compress_ops,
 	.pcm_construct	= sst_soc_pcm_new,
 };

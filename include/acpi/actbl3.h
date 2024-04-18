@@ -3,7 +3,7 @@
  *
  * Name: actbl3.h - ACPI Table Definitions
  *
- * Copyright (C) 2000 - 2020, Intel Corp.
+ * Copyright (C) 2000 - 2021, Intel Corp.
  *
  *****************************************************************************/
 
@@ -34,7 +34,6 @@
 #define ACPI_SIG_TPM2           "TPM2"	/* Trusted Platform Module 2.0 H/W interface table */
 #define ACPI_SIG_UEFI           "UEFI"	/* Uefi Boot Optimization Table */
 #define ACPI_SIG_VIOT           "VIOT"	/* Virtual I/O Translation Table */
-#define ACPI_SIG_VRTC           "VRTC"	/* Virtual Real Time Clock Table */
 #define ACPI_SIG_WAET           "WAET"	/* Windows ACPI Emulated devices Table */
 #define ACPI_SIG_WDAT           "WDAT"	/* Watchdog Action Table */
 #define ACPI_SIG_WDDT           "WDDT"	/* Watchdog Timer Description Table */
@@ -287,7 +286,8 @@ struct acpi_srat_generic_affinity {
 
 /* Flags for struct acpi_srat_generic_affinity */
 
-#define ACPI_SRAT_GENERIC_AFFINITY_ENABLED (1)	/* 00: Use affinity structure */
+#define ACPI_SRAT_GENERIC_AFFINITY_ENABLED     (1)	/* 00: Use affinity structure */
+#define ACPI_SRAT_ARCHITECTURAL_TRANSACTIONS   (1<<1)	/* ACPI 6.4 */
 
 /*******************************************************************************
  *
@@ -553,28 +553,6 @@ struct acpi_viot_virtio_iommu_mmio {
 
 /*******************************************************************************
  *
- * VRTC - Virtual Real Time Clock Table
- *        Version 1
- *
- * Conforms to "Simple Firmware Interface Specification",
- * Draft 0.8.2, Oct 19, 2010
- * NOTE: The ACPI VRTC is equivalent to The SFI MRTC table.
- *
- ******************************************************************************/
-
-struct acpi_table_vrtc {
-	struct acpi_table_header header;	/* Common ACPI table header */
-};
-
-/* VRTC entry */
-
-struct acpi_vrtc_entry {
-	struct acpi_generic_address physical_address;
-	u32 irq;
-};
-
-/*******************************************************************************
- *
  * WAET - Windows ACPI Emulated devices Table
  *        Version 1
  *
@@ -743,6 +721,10 @@ struct acpi_table_wpbt {
 	u8 layout;
 	u8 type;
 	u16 arguments_length;
+};
+
+struct acpi_wpbt_unicode {
+	u16 *unicode_string;
 };
 
 /*******************************************************************************

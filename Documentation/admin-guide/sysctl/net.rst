@@ -31,17 +31,18 @@ see only some of them, depending on your kernel's configuration.
 
 Table : Subdirectories in /proc/sys/net
 
- ========= =================== = ========== ==================
+ ========= =================== = ========== ===================
  Directory Content               Directory  Content
- ========= =================== = ========== ==================
- core      General parameter     appletalk  Appletalk protocol
- unix      Unix domain sockets   netrom     NET/ROM
- 802       E802 protocol         ax25       AX25
- ethernet  Ethernet protocol     rose       X.25 PLP layer
+ ========= =================== = ========== ===================
+ 802       E802 protocol         mptcp      Multipath TCP
+ appletalk Appletalk protocol    netfilter  Network Filter
+ ax25      AX25                  netrom     NET/ROM
+ bridge    Bridging              rose       X.25 PLP layer
+ core      General parameter     tipc       TIPC
+ ethernet  Ethernet protocol     unix       Unix domain sockets
  ipv4      IP version 4          x25        X.25 protocol
- bridge    Bridging              decnet     DEC net
- ipv6      IP version 6          tipc       TIPC
- ========= =================== = ========== ==================
+ ipv6      IP version 6
+ ========= =================== = ========== ===================
 
 1. /proc/sys/net/core - Network core options
 ============================================
@@ -64,6 +65,7 @@ two flavors of JITs, the newer eBPF JIT currently supported on:
   - arm64
   - arm32
   - ppc64
+  - ppc32
   - sparc64
   - mips64
   - s390x
@@ -73,7 +75,6 @@ two flavors of JITs, the newer eBPF JIT currently supported on:
 And the older cBPF JIT supported on the following archs:
 
   - mips
-  - ppc
   - sparc
 
 eBPF JITs are a superset of cBPF JITs, meaning the kernel will
@@ -271,7 +272,7 @@ poll cycle or the number of packets processed reaches netdev_budget.
 netdev_max_backlog
 ------------------
 
-Maximum number  of  packets,  queued  on  the  INPUT  side, when the interface
+Maximum number of packets, queued on the INPUT side, when the interface
 receives packets faster than kernel can process them.
 
 netdev_rss_key
@@ -310,6 +311,17 @@ permit to distribute the load on several cpus.
 
 If set to 1 (default), timestamps are sampled as soon as possible, before
 queueing.
+
+netdev_unregister_timeout_secs
+------------------------------
+
+Unregister network device timeout in seconds.
+This option controls the timeout (in seconds) used to issue a warning while
+waiting for a network device refcount to drop to 0 during device
+unregistration. A lower value may be useful during bisection to detect
+a leaked reference faster. A larger value may be useful to prevent false
+warnings on slow/loaded systems.
+Default value is 10, minimum 1, maximum 3600.
 
 optmem_max
 ----------

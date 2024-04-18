@@ -32,12 +32,6 @@
  * the driver.
  */
 
-static inline struct uvc_streaming *
-uvc_queue_to_stream(struct uvc_video_queue *queue)
-{
-	return container_of(queue, struct uvc_streaming, queue);
-}
-
 static inline struct uvc_buffer *uvc_vbuf_to_buffer(struct vb2_v4l2_buffer *buf)
 {
 	return container_of(buf, struct uvc_buffer, buf);
@@ -109,7 +103,8 @@ static int uvc_buffer_prepare(struct vb2_buffer *vb)
 
 	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT &&
 	    vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0)) {
-		uvc_trace(UVC_TRACE_CAPTURE, "[E] Bytes used out of bounds.\n");
+		uvc_dbg(uvc_queue_to_stream(queue)->dev, CAPTURE,
+			"[E] Bytes used out of bounds\n");
 		return -EINVAL;
 	}
 
@@ -359,17 +354,11 @@ int uvc_queue_streamoff(struct uvc_video_queue *queue, enum v4l2_buf_type type)
 int uvc_queue_mmap(struct uvc_video_queue *queue, struct vm_area_struct *vma)
 {
 	struct uvc_streaming *stream = uvc_queue_to_stream(queue);
-	int ret;
 
-	mutex_lock(&queue->mutex);
-	if (!video_is_registered(&stream->vdev)) {
-		ret = -ENODEV;
-		goto unlock;
-	}
-	ret = vb2_mmap(&queue->queue, vma);
-unlock:
-	mutex_unlock(&queue->mutex);
-	return ret;
+	if (!video_is_registered(&stream->vdev))
+		return -ENODEV;
+
+	return vb2_mmap(&queue->queue, vma);
 }
 
 #ifndef CONFIG_MMU
@@ -377,17 +366,11 @@ unsigned long uvc_queue_get_unmapped_area(struct uvc_video_queue *queue,
 		unsigned long pgoff)
 {
 	struct uvc_streaming *stream = uvc_queue_to_stream(queue);
-	unsigned long ret;
 
-	mutex_lock(&queue->mutex);
-	if (!video_is_registered(&stream->vdev)) {
-		ret = -ENODEV;
-		goto unlock;
-	}
-	ret = vb2_get_unmapped_area(&queue->queue, 0, 0, pgoff, 0);
-unlock:
-	mutex_unlock(&queue->mutex);
-	return ret;
+	if (!video_is_registered(&stream->vdev))
+		return -ENODEV;
+
+	return vb2_get_unmapped_area(&queue->queue, 0, 0, pgoff, 0);
 }
 #endif
 
